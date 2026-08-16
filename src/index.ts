@@ -8,9 +8,10 @@ export const name = 'flowctx-dsh'
 /**
  * Required services. BasicCompactionEngine.inject already lists llm,
  * tokenMeter, and sessions; the compaction service is needed so the
- * engine can register as the active backend.
+ * engine can register as the active backend. tools is the dsh-tools
+ * registry used for flowctx_retrieve and the scratchpad tools.
  */
-export const inject = ['llm', 'tokenMeter', 'sessions', 'compaction']
+export const inject = ['llm', 'tokenMeter', 'sessions', 'compaction', 'tools']
 
 /**
  * Install the FlowCtxCompactionEngine as the active compaction backend.

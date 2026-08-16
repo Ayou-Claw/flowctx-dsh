@@ -2,13 +2,8 @@ import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { BlockAssembler, createUserMessage, contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-
-// dsh-tools is an optional peer — not yet published as a standalone package.
-// Define the minimal types we need locally; when dsh-tools becomes available,
-// these can be replaced with the real import.
-interface ToolExecution { name: string; input: Record<string, unknown> }
-interface ToolExecutionResult { content: Array<{ type: string; text?: string }> }
-type PostToolDecision = { kind: 'accept'; content: Array<{ type: string; text?: string }> } | { kind: 'reject' }
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { PostToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { HANDOFF_INSTRUCTION } from './prompt.ts'
 import { type FlowCtxDshConfig, resolveConfig, type ResolvedFlowCtxConfig } from './config.ts'
 import { CompressionStore } from './store.ts'
@@ -427,17 +422,12 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
 
   private _registerProjection(): void {
     if (!this._fcfg.projection) return
-    // ctx.on('tools/post-execute') requires dsh-tools (not yet published).
-    // Register at runtime when available; no-op otherwise.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ctxAny = this.ctx as any
-    if (typeof ctxAny.on !== 'function') return
 
     const store = this._store
     const threshold = this._fcfg.projectionThreshold
     const ttl = this._fcfg.projectionTtlSeconds
 
-    ctxAny.on('tools/post-execute', async (
+    this.ctx.on('tools/post-execute', async (
       exec: ToolExecution,
       result: Readonly<ToolExecutionResult>,
       next: () => Promise<PostToolDecision>,
@@ -449,8 +439,8 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
       if (!content.length) return decision
 
       let changed = false
-      const newBlocks = content.map((block: { type: string; text?: string }) => {
-        if (block.type !== 'text' || block.text === undefined) return block
+      const newBlocks = content.map((block) => {
+        if (block.type !== 'text') return block
         const projected = projectBlock(block.text, store, {
           thresholdTokens: threshold,
           ttlSeconds: ttl,
@@ -466,21 +456,14 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
   }
 
   // ---- Tool registration ----
-  // ctx.tools requires dsh-tools (not yet published). We register at runtime
-  // when the service is present; no-op otherwise. The `as any` casts are
-  // intentional — remove them once dsh-tools is a real peerDependency.
 
   private _registerTools(): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ctxAny = this.ctx as any
-    const register = ctxAny.tools?.register?.bind(ctxAny.tools)
-    if (typeof register !== 'function') return
-
+    const { ctx } = this
     const store = this._store
     const scratch = this._scratch
     const sessionMeta = this._sessionMeta
 
-    register({
+    ctx.tools.register(defineTool({
       name: 'flowctx_retrieve',
       description:
         'Retrieve the full original content behind a flowctx-dsh marker. ' +
@@ -491,7 +474,11 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
         hash: { type: 'string', description: 'The 24-char hash from a flowctx-dsh compression marker.' },
         node: { type: 'string', description: 'A summary-layer node id (e.g. d0-1-12).' },
       },
-      async execute(args: { hash?: string; node?: string }) {
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: String(value) }],
+      },
+      async execute(args) {
         const nodeArg = (args.node ?? '').trim()
         if (nodeArg) {
           for (const meta of sessionMeta.values()) {
@@ -505,44 +492,56 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
         const original = store.retrieve(hashArg)
         return original ?? `flowctx_retrieve: no entry for hash=${hashArg} (expired or never stored).`
       },
-    })
+    }))
 
     if (!this._fcfg.scratchpad) return
 
-    register({
+    ctx.tools.register(defineTool({
       name: 'flowctx_scratch_append',
       description:
         'Append a line to your working-memory scratchpad (<working_memory> block). ' +
         'Use for current goals, open sub-tasks, or a key result you must not forget this session.',
       parameters: { text: { type: 'string', description: 'Text to append.' } },
-      async execute(args: { text?: string }, exec: { agent?: Agent }) {
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: String(value) }],
+      },
+      async execute(args, exec) {
         const key = exec?.agent?.session?.id ?? 'default'
         const content = scratch.append(key, String(args.text ?? ''))
         return `scratchpad now ${content.length} chars.`
       },
-    })
+    }))
 
-    register({
+    ctx.tools.register(defineTool({
       name: 'flowctx_scratch_replace',
       description: 'Replace the first occurrence of old_text with new_text in your working-memory scratchpad.',
       parameters: { old_text: { type: 'string' }, new_text: { type: 'string' } },
-      async execute(args: { old_text?: string; new_text?: string }, exec: { agent?: Agent }) {
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: String(value) }],
+      },
+      async execute(args, exec) {
         const key = exec?.agent?.session?.id ?? 'default'
         const content = scratch.replace(key, String(args.old_text ?? ''), String(args.new_text ?? ''))
         return `scratchpad now ${content.length} chars.`
       },
-    })
+    }))
 
-    register({
+    ctx.tools.register(defineTool({
       name: 'flowctx_scratch_rethink',
       description: 'Rewrite the entire working-memory scratchpad from scratch with a cleaner, more concise version.',
       parameters: { content: { type: 'string', description: 'The new full scratchpad content.' } },
-      async execute(args: { content?: string }, exec: { agent?: Agent }) {
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: String(value) }],
+      },
+      async execute(args, exec) {
         const key = exec?.agent?.session?.id ?? 'default'
         const newContent = scratch.rethink(key, String(args.content ?? ''))
         return `scratchpad rewritten, now ${newContent.length} chars.`
       },
-    })
+    }))
   }
 }
 

@@ -70,13 +70,14 @@ describe('resolveTarget()', () => {
 function makeCtx() {
   const ctx = new Context()
 
-  // Provide stub services so cordis.provide() succeeds for llm/tokenMeter/sessions
+  // Provide stub services so cordis.provide() succeeds for llm/tokenMeter/sessions/tools
   const streamMock = vi.fn(async function* (_options: unknown) {
     // default: no chunks
   })
   ctx.provide('llm', { stream: streamMock } as never)
   ctx.provide('tokenMeter', {} as never)
   ctx.provide('sessions', {} as never)
+  ctx.provide('tools', { register: vi.fn(), execute: vi.fn() } as never)
 
   return { ctx, streamMock }
 }
