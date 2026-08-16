@@ -131,7 +131,7 @@ DSH 版本的 SWE-bench 评测正在进行中，结果将在此更新。
 
 ## DSH 原生集成
 
-flowctx-dsh 建立在 DSH 已有的三道防线之上：
+flowctx-dsh 建立在 DSH 已有的三道防线之上，并在两个 hook 点上扩展它们。下图中标 `[+]` 的部分是 flowctx-dsh 新增的能力：
 
 ```
 工具调用返回
@@ -143,16 +143,34 @@ flowctx-dsh 建立在 DSH 已有的三道防线之上：
 [第二道] ToolResultPruner     超长历史 tool/result 节点 → head+tail 裁剪，中间标记
     │
     ▼
+[+] tools/post-execute        flowctx-dsh：超阈值 tool result → 可逆结构化投影，
+    │                          原文写入 CompressionStore（内存 + 可选 SQLite），
+    │                          上下文里留带 hash 的 marker
+    ▼
 [第三道] BasicCompactionEngine
     │   agent/pre-step：历史 token 超阈值 → LLM 摘要
     │                                           ↑
     │                              flowctx-dsh 替换此处的摘要提示词
     │                              → 输出工程师交接笔记而非通用摘要
+    │
+[+] agent/pre-step（另挂一条 hook）
+    │   flowctx-dsh：纯函数规划分层 DAG 摘要 → 后台 fire-and-forget drain
+    │   （leaf 折叠 + condense 逐级压缩，summary nodes 可选持久化到 SQLite）
+    │   → 把 active summary node 作为 placeholder 注入进入 LLM 的消息流
     ▼
 LLM 请求
+
+[+] 工具：flowctx_retrieve（按 hash 取回压缩原文，或按 node id 取回某层交接笔记）
+          可选 flowctx_scratch_*（模型可编辑的 working memory）
 ```
 
-flowctx-dsh 只替换最后一层的摘要提示词。压力检测、范围选择、KV cache 重放、事务管理、溢出恢复（`agent/request-error`）等所有机制原封不动继承自 `BasicCompactionEngine`。
+flowctx-dsh 不止替换摘要提示词，它做了三件事：
+
+1. **替换第三道的摘要提示词** —— 输出工程师交接笔记而非通用摘要（压力检测、范围选择、KV cache 重放、事务管理、溢出恢复 `agent/request-error` 等机制仍原封不动继承自 `BasicCompactionEngine`）；
+2. **在 `tools/post-execute` 新增可逆投影** —— 工具结果一返回就结构化压缩，原文进 CompressionStore，可随时按 hash 取回；
+3. **在 `agent/pre-step` 另挂一条分层 DAG 压缩流水线** —— 后台异步执行、不阻塞关键路径，把历史折叠成分层 summary nodes 并注入占位块。
+
+投影、分层摘要、SQLite 持久化默认开启，均可通过配置关闭；关闭全部扩展后，行为等同于换了摘要风格的 `dsh-compaction-basic`。
 
 ---
 
