@@ -1,8 +1,8 @@
 <div align="center">
 
-# flowctx-dsh
+<img src="docs/assets/long-logo.jpeg" alt="flowctx-dsh — Engineering Working Memory for AI Agents (DSH Plugin)" width="100%" />
 
-**Context compression for DeepSeek Harness — memory that fades, instead of snapping.**
+# flowctx-dsh
 
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/harness) 的本地优先上下文引擎：当前任务原文保留，临近历史可逆压缩，更早历史折叠成工程师交接笔记 —— 关键材料始终可恢复。
 
