@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>flowctx-dsh · DeepSeek Harness 上下文引擎流程演示</title>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0d1219; --panel:#0f141c; --line:#1c2530; --line2:#26313f;
+    --ink:#d7e0ea; --dim:#7b8794; --faint:#4a5663;
+    --orange:#e8954a; --orange-d:#5a3c20;
+    --blue:#5b8bd0; --blue-d:#21344d;
+    --green:#5cb87a; --green-d:#234634;
+    --purple:#a98ad6; --purple-d:#2a2340;
+    --bar:#3b6fd4;
+    --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,"Liberation Mono",monospace;
+    --cjk:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",var(--mono);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--cjk); font-size:15.5px; line-height:1.75;
+    -webkit-font-smoothing:antialiased;
+  }
+  code,.mono{font-family:var(--mono)}
+  a{color:var(--blue)}
+
+  /* ---- layout: left scroll narrative, right sticky stage ---- */
+  .wrap{display:grid; grid-template-columns:minmax(360px,42%) 1fr; gap:0;}
+  .left{padding:0 5vw;}
+  .right{position:sticky; top:0; height:100vh; padding:24px 32px 24px 0; display:flex; flex-direction:column; gap:18px; overflow:hidden;}
+  @media(max-width:900px){
+    .wrap{grid-template-columns:1fr}
+    .right{position:relative; height:auto; padding:24px}
+  }
+
+  /* ---- left steps ---- */
+  .step{min-height:100vh; display:flex; flex-direction:column; justify-content:center; padding:8vh 0;}
+  .badge{display:inline-flex; align-items:center; gap:6px; align-self:flex-start;
+    border:1px solid var(--orange); color:var(--orange); border-radius:6px;
+    padding:4px 11px; font-size:12.5px; letter-spacing:.12em; text-transform:uppercase; margin-bottom:18px; font-family:var(--mono);}
+  .badge.blue{border-color:var(--blue); color:var(--blue)}
+  .badge.green{border-color:var(--green); color:var(--green)}
+  .badge.purple{border-color:var(--purple); color:var(--purple)}
+  .dots{display:flex; gap:7px; margin-bottom:26px; flex-wrap:wrap; max-width:300px;}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--faint); transition:.3s;}
+  .dot.on{width:22px; border-radius:4px; background:var(--ink);}
+  .step h2{font-size:34px; margin:0 0 18px; letter-spacing:-.4px; line-height:1.3;}
+  .step p{color:var(--dim); margin:0 0 20px; max-width:46ch; font-size:16px;}
+  /* inline highlight — soft accent chip for a key phrase */
+  .hl{color:var(--green); background:rgba(92,184,122,.10); border-radius:4px; padding:1px 6px; font-weight:600; box-decoration-break:clone; -webkit-box-decoration-break:clone;}
+  .box{border:1px solid var(--line2); border-radius:10px; padding:16px 18px; background:var(--panel); max-width:54ch; font-size:14.5px;}
+  .box .t{color:var(--orange); font-size:12px; letter-spacing:.1em; text-transform:uppercase; margin-bottom:9px; font-family:var(--mono);}
+  .box.blue .t{color:var(--blue)} .box.green .t{color:var(--green)} .box.purple .t{color:var(--purple)}
+  .box code{color:var(--ink)}
+  .box .muted{color:var(--faint)}
+  .hero h1{font-size:54px; margin:0 0 12px; letter-spacing:-1.2px; line-height:1.18;}
+  .hero .sub{color:var(--orange); font-size:15px; letter-spacing:.08em;}
+  /* hero tier list — the three-tier design principle */
+  .tiers{list-style:none; padding:0; margin:18px 0 4px; max-width:52ch; display:flex; flex-direction:column; gap:9px;}
+  .tiers li{display:flex; gap:12px; align-items:flex-start;}
+  .tiers .td{flex:none; width:88px; text-align:center; font-size:12px; font-weight:700; font-family:var(--mono); padding:3px 6px; border-radius:6px; border:1px solid; margin-top:1px;}
+  .tiers .td.older{border-color:var(--orange); color:var(--orange); background:rgba(232,149,74,.08);}
+  .tiers .td.past{border-color:var(--purple); color:var(--purple); background:rgba(169,138,214,.08);}
+  .tiers .td.cur{border-color:var(--green); color:var(--green); background:rgba(92,184,122,.08);}
+  .tiers .tt{color:var(--dim); font-size:14.5px; line-height:1.55;}
+  .tiers .tt b{color:var(--ink); font-weight:600;}
+  /* hero feature list */
+  .features{list-style:none; padding:0; margin:22px 0 0; max-width:50ch;}
+  .features li{display:flex; gap:11px; align-items:flex-start; padding:9px 0; border-top:1px solid var(--line);}
+  .features li:first-child{border-top:none;}
+  .features .fi{flex:none; color:var(--orange); font-family:var(--mono); font-size:13px; font-weight:700; min-width:34px;}
+  .features .ft{color:var(--ink); font-size:15.5px;}
+  .features .ft b{color:#fff; font-weight:600;}
+  .features .fd{color:var(--dim); font-size:13.5px; display:block; margin-top:2px;}
+  .kv{color:var(--faint); font-size:13px; margin-top:14px; line-height:1.7;}
+  .kv b{color:var(--dim); font-weight:600}
+
+  /* ---- right stage ---- */
+  .card{border:1px solid var(--line); border-radius:12px; background:var(--bg2); padding:14px 16px;}
+  .ctx{flex:1 1 auto; display:flex; flex-direction:column; min-height:0;}
+  .ctx-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;}
+  .ctx-head .ttl{font-size:13.5px; letter-spacing:.14em; text-transform:uppercase; font-weight:700; font-family:var(--mono);}
+  .pill{border:1px solid var(--orange); color:var(--orange); border-radius:5px; padding:1px 7px; font-size:10px; letter-spacing:.1em; font-family:var(--mono);}
+  .pill.ff{border-color:var(--blue); color:var(--blue); margin-right:6px;}
+  .budget-row{display:flex; align-items:center; justify-content:space-between; font-size:12.5px; color:var(--dim); letter-spacing:.05em; text-transform:uppercase; font-family:var(--mono);}
+  .budget-row .num{color:var(--blue); font-weight:700}
+  .budget-row .num.hot{color:var(--orange)}
+  .bar{height:6px; background:#161d27; border-radius:4px; margin:6px 0 4px; overflow:hidden; position:relative;}
+  .bar>i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--bar),#6aa0ff); border-radius:4px; transition:width .6s cubic-bezier(.2,.7,.2,1);}
+  .bar>i.hot{background:linear-gradient(90deg,#d8763a,var(--orange));}
+  .trigmark{position:absolute; top:-3px; bottom:-3px; left:100%; width:1px; background:var(--orange); opacity:.55;}
+  .trigmark::after{content:"100k 门控"; position:absolute; top:-15px; left:-52px; font-size:8px; color:var(--orange); white-space:nowrap; font-family:var(--mono);}
+  .bar-sp{margin-bottom:12px;}
+  .msgs{flex:1 1 auto; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; position:relative; min-height:0;}
+  .msgs::-webkit-scrollbar{width:6px;} .msgs::-webkit-scrollbar-thumb{background:var(--line2); border-radius:3px;}
+  .empty{color:var(--faint); text-align:center; margin:auto;}
+
+  .row{border:1px solid var(--line2); border-radius:9px; padding:9px 12px; display:flex; gap:10px; align-items:flex-start;
+       opacity:0; transform:translateY(8px); transition:opacity .5s, transform .5s, border-color .4s, background .4s;}
+  .row.show{opacity:1; transform:none;}
+  .row .tag{flex:none; width:18px; height:18px; border-radius:5px; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; margin-top:1px; font-family:var(--mono);}
+  .row .body{flex:1 1 auto; min-width:0;}
+  .row .meta{font-size:11.5px; color:var(--faint); letter-spacing:.04em; font-family:var(--mono);}
+  .row .text{color:var(--ink); font-size:14px; white-space:normal; overflow-wrap:anywhere; word-break:break-word;}
+  .row .tok{flex:none; font-size:11.5px; color:var(--faint); margin-left:auto; padding-left:8px; font-family:var(--mono);}
+  .row .ft{flex:none; border:1px solid var(--green); color:var(--green); border-radius:4px; font-size:10.5px; padding:1px 6px; letter-spacing:.06em; margin-left:6px; font-family:var(--mono);}
+  /* user */
+  .row.user{border-color:var(--blue-d)} .row.user .tag{background:var(--blue-d); color:var(--blue)}
+  /* assistant */
+  .row.asst{border-color:var(--green-d)} .row.asst .tag{background:var(--green-d); color:var(--green)}
+  /* tool_use — the assistant's OUTBOUND tool call (intermediate step, before the result) */
+  .row.tuse{border-color:var(--blue-d); border-style:dashed; background:#0c1119;}
+  .row.tuse .tag{background:var(--blue-d); color:var(--blue)}
+  .row.tuse .meta{color:var(--blue)}
+  .row.tuse .text{font-family:var(--mono); font-size:12.5px; color:var(--dim);}
+  .row.tuse .text .fn{color:var(--blue)} .row.tuse .text .arg{color:var(--ink)}
+  .row.tuse .tok{color:var(--faint)}
+  .row.tuse .call{flex:none; border:1px solid var(--blue-d); color:var(--blue); border-radius:4px; font-size:10.5px; padding:1px 6px; letter-spacing:.06em; margin-left:6px; font-family:var(--mono);}
+  /* tool result (structured compression) */
+  .row.tool{border-color:#3a3050} .row.tool .tag{background:var(--purple-d); color:var(--purple)}
+  .row.tool .text{font-family:var(--mono); font-size:12.5px;}
+  /* the dashed connector between a tool_use and its result */
+  .row.tool.paired{position:relative;}
+  .row.tuse.paired::after{content:""; position:absolute; left:20px; bottom:-9px; width:1px; height:9px; border-left:1px dashed var(--line2);}
+  /* summary card */
+  .row.sum{border-color:var(--orange); background:#171108;}
+  .row.sum .tag{background:var(--orange-d); color:var(--orange)}
+  .row.sum .head{color:var(--orange); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; font-family:var(--mono);}
+  .row.sum .sub{color:var(--faint); font-size:11.5px;}
+  .row.sum .text{white-space:normal; color:var(--dim); margin-top:3px;}
+  /* depth-1 condensed summary block: purple accent */
+  .row.sum.d1{border-color:var(--purple); background:#14101f;}
+  .row.sum.d1 .tag{background:var(--purple-d); color:var(--purple)}
+  .row.sum.d1 .head{color:var(--purple)}
+  .row.handoff{border-color:var(--orange); background:#1a1206;}
+  .row.handoff .text{white-space:pre-wrap; color:var(--ink); font-size:13px;}
+  /* elision separator — "middle turns omitted" */
+  .elide{display:flex; align-items:center; gap:10px; padding:2px 2px; opacity:0; transform:translateY(6px); transition:opacity .5s, transform .5s;}
+  .elide.show{opacity:1; transform:none;}
+  .elide .ln{flex:1 1 auto; height:1px; background:repeating-linear-gradient(90deg,var(--line2) 0 4px,transparent 4px 9px);}
+  .elide .lbl{flex:none; font-size:11px; color:var(--faint); font-family:var(--mono); letter-spacing:.06em; white-space:nowrap;}
+  /* turn-zone divider — labels a band of rows by tier */
+  .zone{display:flex; align-items:center; gap:8px; margin:4px 0 2px; opacity:0; transform:translateY(6px); transition:opacity .5s, transform .5s;}
+  .zone.show{opacity:1; transform:none;}
+  .zone .z{flex:none; font-size:10px; letter-spacing:.1em; text-transform:uppercase; font-family:var(--mono); padding:1px 7px; border-radius:4px; border:1px solid;}
+  .zone .z.older{border-color:var(--orange); color:var(--orange);}
+  .zone .z.past{border-color:var(--purple); color:var(--purple);}
+  .zone .z.cur{border-color:var(--green); color:var(--green);}
+  .zone .ln{flex:1 1 auto; height:1px; background:var(--line);}
+  /* turn group — a user turn with its tool_use/tool_result/assistant nested beneath */
+  .turn{opacity:0; transform:translateY(8px); transition:opacity .5s, transform .5s; display:flex; flex-direction:column; gap:8px;}
+  .turn.show{opacity:1; transform:none;}
+  .turn>.kids{display:flex; flex-direction:column; gap:8px; margin-left:16px; padding-left:12px; border-left:2px solid var(--line2);}
+  .turn.cur>.kids{border-left-color:var(--green-d);}
+  .turn.past>.kids{border-left-color:#3a3050;}
+  .turn .kids .row{margin:0;}
+  /* rows nested in a turn ride the parent .turn's reveal — they don't get their own .show */
+  .turn .row{opacity:1; transform:none;}
+  /* the user turn header sits flush; children indent under it */
+  .frozen{position:absolute; left:-9px; top:0; width:2px; background:linear-gradient(180deg,var(--orange),transparent);}
+  .note{font-size:12.5px; color:var(--green); margin-top:8px;}
+  .note.dim{color:var(--faint)}
+  .note .x{color:var(--orange)}
+
+  /* DAG */
+  .dag{flex:none;}
+  .dag-head{display:flex; justify-content:space-between; font-size:13.5px; letter-spacing:.14em; text-transform:uppercase; font-weight:700; margin-bottom:12px; font-family:var(--mono);}
+  .dag-head .n{color:var(--faint); font-weight:400; letter-spacing:0; font-size:12px;}
+  .dag-grid{display:flex; gap:14px; align-items:flex-start; min-height:120px;}
+  .dnode{opacity:0; transform:scale(.9); transition:.5s;}
+  .dnode.show{opacity:1; transform:none;}
+  .dnode .s{border:1px solid var(--orange); border-radius:8px; padding:8px 10px; background:#140f08; width:138px;}
+  .dnode .s .h{color:var(--orange); font-size:10px; letter-spacing:.04em; text-transform:uppercase; font-family:var(--mono);}
+  /* depth-1 condensed DAG node: purple, denotes "summary of summaries" */
+  .dnode.cond .s{border-color:var(--purple); background:#14101f;}
+  .dnode.cond .s .h{color:var(--purple)}
+  .dnode.cond .raw{border-color:var(--purple); color:var(--purple)}
+  .dnode.cond .edge{border-left-color:var(--purple)}
+  .dnode .s .l{color:var(--dim); font-size:10px; margin-top:2px;}
+  .dnode .edge{width:1px; height:14px; border-left:1px dashed var(--blue); margin:4px auto;}
+  .dnode .raw{border:1px dashed var(--blue); border-radius:8px; padding:7px 10px; width:138px; color:var(--blue); font-size:10px;}
+  .dnode .raw .l2{color:var(--faint)}
+  .dnode .hashr{font-size:9px; color:var(--faint); margin-top:4px; text-align:center; font-family:var(--mono);}
+  /* DAG filler: ellipsis node (omitted leaves) + arrow into condense */
+  .dfill{opacity:0; transform:scale(.9); transition:.5s; display:flex; flex-direction:column; align-items:center; justify-content:center; align-self:stretch; min-height:96px;}
+  .dfill.show{opacity:1; transform:none;}
+  .dfill.ellipsis{width:96px; border:1px dashed var(--orange-d); border-radius:8px; background:rgba(232,149,74,.05); gap:2px;}
+  .dfill .ell{color:var(--orange); font-size:20px; line-height:1; font-family:var(--mono);}
+  .dfill .elll{color:var(--dim); font-size:10px; text-align:center; line-height:1.35; font-family:var(--mono);}
+  .dfill .elll .dim2{color:var(--faint);}
+  .dfill.arrow-wrap{width:40px; gap:3px;}
+  .dfill .arrow{color:var(--purple); font-size:22px; line-height:1;}
+  .dfill .arrl{color:var(--purple); font-size:9px; letter-spacing:.06em; text-transform:uppercase; font-family:var(--mono);}
+
+  /* hint */
+  .scrollhint{position:fixed; bottom:18px; left:50%; transform:translateX(-50%); color:var(--faint); font-size:11px; letter-spacing:.15em; animation:bob 1.8s infinite;}
+  @keyframes bob{0%,100%{opacity:.4; transform:translate(-50%,0)}50%{opacity:1; transform:translate(-50%,5px)}}
+  .footer{padding:5vh 5vw 12vh 0; color:var(--faint); font-size:14px; line-height:1.7; border-top:1px solid var(--line); margin-top:0;}
+  .footer b{color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- ================= LEFT: scroll narrative ================= -->
+  <div class="left" id="left">
+
+    <section class="step hero" data-step="0">
+      <span class="badge">flowctx-dsh · DeepSeek Harness 上下文引擎</span>
+      <h1>记忆应当渐远,而非骤断。</h1>
+      <div class="sub">一个观点:上下文不是「装满就截断」的缓冲区,而是一段有纵深的记忆 —— 越近越清晰,越远越凝练,却从不真正遗忘。</div>
+      <p style="margin-top:22px">主流做法在窗口溢出时<b style="color:var(--dim)">一刀切截断</b>较早的回合,把其中的工作知识连同退路一起丢弃。flowctx-dsh 是一个 DeepSeek Harness (DSH) 上下文引擎插件,换一种取舍:<b style="color:var(--ink)">按与当前任务的距离分档保真</b> —— 离得越远,压得越狠;离得越近,保得越全;当前正在做的事,分毫不动。原文则始终可按需还原。于是<b style="color:var(--ink)">前缀缓存稳、推理不掉速、任务不断线</b> —— 三者兼得,而非彼此让步。三档:</p>
+      <ul class="tiers">
+        <li><span class="td older">更早历史</span><span class="tt"><b>摘要压缩</b> —— LLM 折叠成分层交接笔记,逐字保留失败做法与关键标识符。</span></li>
+        <li><span class="td past">临近过往轮</span><span class="tt"><b>结构化压缩</b>(零 LLM)—— 按内容类型确定性压缩,可字节级还原。</span></li>
+        <li><span class="td cur">当前轮任务</span><span class="tt"><b>零语义丢失</b> —— 原文原样入模,不压缩、不摘要。</span></li>
+      </ul>
+      <ul class="features">
+        <li><span class="fi">C3</span><span class="ft"><b>可逆 · 可审计</b> <span class="fd">原文以 SHA-256 内容哈希留存,模型经 <code>flowctx_retrieve(hash)</code> 字节级取回 —— 压缩视图有损,原文无损。</span></span></li>
+        <li><span class="fi">C5</span><span class="ft"><b>KV-Cache 友好</b> <span class="fd">前缀靠压缩幂等(同内容→同哈希→跨回合同字节)保持稳定;摘要仅罕见触发、不扰动前缀。</span></span></li>
+        <li><span class="fi">C4</span><span class="ft"><b>后台化 · 不阻塞</b> <span class="fd">摘要越过阈值才触发,跑在主模型上、fire-and-forget,当前回合从不等它。</span></span></li>
+        <li><span class="fi">C2</span><span class="ft"><b>仅追加 · 持久化</b> <span class="fd">从不改写宿主会话;压缩只发生在 <code>assemble()</code> 读时投影,磁盘永远是未压缩的原文真相源。</span></span></li>
+      </ul>
+    </section>
+
+    <section class="step" data-step="1">
+      <span class="badge blue">阶段 1 · 初始化</span>
+      <div class="dots"></div>
+      <h2>一开始 —— 全是原文,一点不压。</h2>
+      <p>会话刚起步,<b style="color:var(--ink)">还没有历史</b>。每个回合 DSH 调用引擎的 <code>assemble()</code>,消息按引用<b style="color:var(--ink)">原样透传</b>流入窗口 —— 字节不变、服务商 KV 缓存始终命中、不调 LLM。此刻只有当前这一轮、窗口占用还很低,<b style="color:var(--green)">没有任何压缩发生</b>,右侧全是原文。</p>
+      <div class="box blue"><div class="t">assemble · 按引用透传</div>
+        前缀消息<b style="color:var(--ink)">按引用原样透传</b>,字节不变 → 前缀缓存持续命中。轻量、零 LLM。</div>
+    </section>
+
+    <section class="step" data-step="2">
+      <span class="badge purple">阶段 2 · 结构化压缩(&lt;100k)</span>
+      <div class="dots"></div>
+      <h2>有了历史,但还没满 —— 过往轮先做结构化压缩。</h2>
+      <p>轮次积累,装配量升到约 <b style="color:var(--ink)">52k</b>(仍<b style="color:var(--ink)">未越过 100k 门控</b>),所以<b style="color:var(--orange)">还不需要摘要</b>。flowctx 先做<b style="color:var(--purple)">结构化压缩</b>:<b style="color:var(--purple)">已离开当前任务的过往轮</b>里,那些超大工具结果(读过的整份源码、跑过的长日志)按内容类型<b style="color:var(--ink)">确定性压缩</b>(零 LLM、可字节级还原);中间结构相似的若干轮直接省略。<b style="color:var(--green)">当前轮</b>始终原文不动。</p>
+      <div class="box purple"><div class="t">detectContentType · 过往轮 tool_result 按类型路由</div>
+        代码折叠保签名 / JSON 保结构骨架 / diff 保 hunk / CLI 规则引擎。原文按 <code>sha256[:24]</code> 存储,替换为标记:<br>
+        <code class="muted">[flowctx: code compressed 8400→190 chars · flowctx_retrieve(hash="a91f…")]</code><br>
+        <span class="muted">tool_use 中间调用块始终原样透传,只压结果。</span></div>
+    </section>
+
+    <section class="step" data-step="3">
+      <span class="badge">阶段 3 · 首个 leaf chunk(达到 100k)</span>
+      <div class="dots"></div>
+      <h2>窗口快满了 —— 分段有序的压缩,而不是全部。</h2>
+      <p>光靠结构化压缩,窗口占用还是逼近了 <b style="color:var(--orange)">100k</b> 门控。这时 flowctx 才动用摘要,而且很克制:<b style="color:var(--ink)">不会一口气把历史全压掉</b>,只把<b style="color:var(--orange)">最旧的那一段</b>切出来、折成一个 leaf 节点(<code>d0-1-3</code>)。更旧的其余历史排在后面,轮到了再逐段折;<b style="color:var(--purple)">离得近的过往轮</b>此刻仍是结构化压缩,并不摘要。折出来的这一段,留下一份<b style="color:var(--ink)">交接笔记</b> —— <span class="hl">失败的做法、关键的标识符,一字不落</span>,原文也随时能按哈希取回。</p>
+      <div class="box"><div class="t">leaf chunk d0-1-3(深度 0) · 后台摘要 · 真实审计</div>
+        <code>caller=context-engine.turn.maintenance</code> · 输入 12,875 → 输出 3,400 tok · $0.059<br>
+        <span class="muted">每段最多 <code>leafChunkTokens</code>,越过门控才触发 —— 摘要是最后一档手段。</span></div>
+    </section>
+
+    <section class="step" data-step="4">
+      <span class="badge blue">阶段 4 · 多个 leaf chunk → condense</span>
+      <div class="dots"></div>
+      <h2>轮次越来越多 —— chunk 逐个折叠,攒够再 condense。</h2>
+      <p>对话继续,更旧的历史<b style="color:var(--orange)">一个 chunk 接一个 chunk</b>地被折叠成独立 leaf(<code>d0-1-3</code> · <code>d0-4-6</code> · <code>d0-7-16</code> …)—— 每个 chunk <b style="color:var(--ink)">按话题独立成块、互不稀释</b>,早期话题不淡出。当同层 leaf 累积到 <code>condenseFanout</code> 个,flowctx 把它们 condense 成一个<b style="color:var(--purple)">深度 +1 的上层节点 <code>d1-1-31</code></b>,子 leaf 被遮蔽、只注入这一块 —— <b style="color:var(--ink)">极长会话摘要块数量始终有界</b>。这才是「渐进折叠」:从单个 chunk,到多 chunk,再到 condense。</p>
+      <div class="box purple"><div class="t">leaf chunk 累积 → condensed 节点 d1-1-31(深度 1)</div>
+        <code>d1-1-31 · childIds=[d0-1-3 · d0-4-6 · d0-7-16 …]</code><br>
+        <span class="muted">真实 run 全程仅 4/40 点越过 100k,每次折一个 chunk 就拉回;装配量稳压在阈值附近。</span></div>
+    </section>
+
+    <section class="step" data-step="5">
+      <span class="badge green">阶段 5 · 终态</span>
+      <div class="dots"></div>
+      <h2>终态:三档分层稳定,没有东西真正丢失。</h2>
+      <p>系统进入<b style="color:var(--ink)">稳态</b>,右侧呈现清晰的三档:<b style="color:var(--orange)">更早历史</b>收敛为有界的 condense 节点 · <b style="color:var(--purple)">临近过往轮</b>结构化压缩 · <b style="color:var(--green)">当前轮</b>始终原文、分毫未压。原文、scratchpad、各层摘要全部持久化到 <b style="color:var(--ink)">SQLite</b>,经 <code>flowctx_retrieve(hash / node)</code> <b style="color:var(--ink)">字节级还原</b>,重启零 LLM 重建。这套分层同时守住前缀缓存、推理性能与任务完成率。</p>
+    </section>
+
+
+    <div class="footer">
+      <b>flowctx</b> —— 一个面向 DeepSeek Harness (DSH) 的无损上下文引擎。渐进式分层:原始 → 结构化压缩 → 摘要压缩 → leaf 折叠 → 稳定终态,全链路字节级可还原。
+    </div>
+  </div>
+
+  <!-- ================= RIGHT: sticky stage ================= -->
+  <div class="right">
+    <div class="card ctx">
+      <div class="ctx-head">
+        <span class="ttl">上下文窗口 Context Window <span class="pill ff" id="ffpill" style="display:none">FF</span></span>
+        <span class="pill">flowctx</span>
+      </div>
+      <div class="budget-row"><span>窗口占用</span><span class="num" id="budget">0%</span></div>
+      <div class="bar bar-sp"><i id="barfill"></i><span class="trigmark"></span></div>
+      <div class="msgs" id="msgs">
+        <div class="frozen" id="frozen" style="display:none"></div>
+        <div class="empty" id="empty">等待消息流入…</div>
+      </div>
+      <div class="note dim" id="ftnote" style="display:none">● 当前轮(按 user 轮)零语义丢失,不结构化压缩、不摘要;上限 freshTailWindow</div>
+    </div>
+
+    <div class="card dag">
+      <div class="dag-head"><span>摘要 DAG</span><span class="n" id="dagcount">0 个节点</span></div>
+      <div class="dag-grid" id="dag"></div>
+    </div>
+  </div>
+</div>
+<div class="scrollhint" id="hint">向下滚动 ↓</div>
+
+<script>
+// ---- message rows per step (cumulative scenes) -------------------------------
+// 真实场景:bench-openai-xiaomi-mimo-v2-5-pro 在单个共享 session 里连续跑 40 道 SWE-bench 题。
+// 下面选取真实第 1 题(django URLValidator)与真实折叠点(turn 7/23/40)呈现。
+// budget[1] = 装配量占「100k 门控」的百分比(而非占 1M 窗口),使折叠锯齿可见。
+const F='<span class="ft">FRESH TAIL</span>';
+const scenes = {
+  0:{budget:[0,0],ff:false,rows:[],empty:true,dag:0,ftnote:false,frozen:false},
+
+  // 阶段 1 — 初始化:原始消息累积,全是原文,无任何压缩
+  1:{budget:[6300,8],ff:false,frozen:false,ftnote:false,dag:0,rows:[
+    {c:'zone',z:'cur',label:'当前轮 · 全部原文(会话刚起步,无历史)'},
+    {c:'user',tag:'用',meta:'turn 1 · django-10097',text:'修复 URLValidator:未编码的 :、@、/ 应被拒绝(RFC 1738)。',tok:'620 tok',ft:true,zoneClass:'cur',children:[
+      {c:'tuse',tag:'⚙',meta:'tool_use',fn:'read',args:['path="django/core/validators.py"'],tok:'30 tok',ft:true},
+      {c:'tool',tag:'⛭',meta:'tool_result · read · 原文(不压缩)',text:'import ipaddress … class URLValidator(RegexValidator): …(整份文件原样保留)',tok:'2100 tok',ft:true},
+      {c:'asst',tag:'助',meta:'assistant',text:'定位到 user:pass 段的正则 (?:\\S+(?::\\S*)?@)? —— \\S+ 太宽。',tok:'220 tok',ft:true},
+    ]},
+  ]},
+
+  // 阶段 2 — 有历史但 <100k:过往轮做结构化压缩(零 LLM),当前轮仍原文
+  2:{budget:[52000,52],ff:false,frozen:false,ftnote:true,dag:0,rows:[
+    {c:'zone',z:'past',label:'过往轮 · 结构化压缩(零 LLM · 可还原)'},
+    {c:'user',tag:'用',meta:'turn 3 · django-10097(过往轮)',text:'跑一下校验测试。',tok:'80 tok',zoneClass:'past',children:[
+      {c:'tuse',tag:'⚙',meta:'tool_use',fn:'exec',args:['cmd="python tests/runtests.py validators"'],tok:'30 tok'},
+      {c:'tool',tag:'⛭',meta:'tool_result · exec · test-output(≈5.6k 字符)',text:'[flowctx: cli-output compressed 5600→210 chars · flowctx_retrieve(hash="b4e2…")]',tok:'52 tok',note:'compressed'},
+    ]},
+    {c:'elide',text:'⋯ 省略中间 6 轮(同为过往轮,均结构化压缩)⋯'},
+    {c:'user',tag:'用',meta:'turn 10 · sympy-12096(过往轮)',text:'(过往轮)排查 sympy evalf 精度。',tok:'340 tok',zoneClass:'past',children:[
+      {c:'tuse',tag:'⚙',meta:'tool_use',fn:'read',args:['path="sympy/core/function.py"'],tok:'30 tok'},
+      {c:'tool',tag:'⛭',meta:'tool_result · read · code(≈8.4k 字符)',text:'[flowctx: code compressed 8400→190 chars · flowctx_retrieve(hash="a91f…")]',tok:'48 tok',note:'compressed'},
+    ]},
+    {c:'zone',z:'cur',label:'当前轮 · 原文,零语义丢失'},
+    {c:'user',tag:'用',meta:'turn 11 · django-10880(当前轮)',text:'修 COUNT(DISTINCTCASE…) 缺空格。',tok:'420 tok',ft:true,zoneClass:'cur',children:[
+      {c:'tool',tag:'⛭',meta:'tool_result · exec · 当前轮(原文,不压缩)',text:'定位 SQLAggregate 模板;DISTINCT 后缺空格,原样保留供模型直接判断。',tok:'560 tok',ft:true},
+    ]},
+  ]},
+
+  // 阶段 3 — 达到 100k:最旧的一个 leaf chunk 被折叠(按 leafChunkTokens 分块,非全量)
+  3:{budget:[100000,100],hot:true,ff:false,frozen:true,ftnote:true,dag:1,handoff:true,rows:[
+    {c:'zone',z:'older',label:'最旧一个 leaf chunk · 摘要折叠(≤ leafChunkTokens)'},
+    {c:'sum',sum:true,depth:0,id:'d0-1-3',span:'leaf d0-1-3 · 仅覆盖最旧 turn 1–3 · 132,902→121,592 tok',text:'只折叠最旧的一个 chunk(按 leafChunkTokens 切边界),而非全部历史。占位符展开为交接笔记 —— 见右侧。',tok:'3400 tok'},
+    {c:'elide',text:'⋯ 更旧的其余历史仍在,等待后续按 chunk 逐个折叠 ⋯'},
+    {c:'zone',z:'past',label:'临近过往轮 · 仍为结构化压缩(未折叠)'},
+    {c:'user',tag:'用',meta:'turn 8 · sympy-12096(过往轮)',text:'(过往轮)排查 sympy evalf 精度。',tok:'340 tok',zoneClass:'past',children:[
+      {c:'tool',tag:'⛭',meta:'tool_result · read · code(结构化压缩,未摘要)',text:'[flowctx: code compressed 8400→190 chars · flowctx_retrieve(hash="a91f…")]',tok:'48 tok',note:'compressed'},
+    ]},
+    {c:'zone',z:'cur',label:'当前轮 · 原文,零语义丢失'},
+    {c:'user',tag:'用',meta:'turn 9 · django-10880(当前轮)',text:'修 COUNT(DISTINCTCASE…) 缺空格。',tok:'420 tok',ft:true,zoneClass:'cur'},
+  ]},
+
+  // 阶段 4 — 轮次变多:更多 leaf chunk 逐个折叠,攒够再 condense;下方仍保留近窗过往轮与当前轮
+  4:{budget:[102812,44],ff:true,frozen:true,ftnote:true,dag:4,condense:true,rows:[
+    {c:'zone',z:'older',label:'多个 leaf chunk · 逐个折叠,再 condense'},
+    {c:'sum',sum:true,depth:0,id:'d0-1-3',span:'leaf chunk · turn 1–3',text:'最旧一段:URLValidator 修复,以及一处被回滚的做法(交接笔记逐字留存)。',tok:'3400 tok'},
+    {c:'sum',sum:true,depth:0,id:'d0-4-6',span:'leaf chunk · turn 4–6',text:'次旧一段(COUNT DISTINCT 空格 + TIME_ZONE 未生效)。',tok:'3400 tok'},
+    {c:'sum',sum:true,depth:0,id:'d0-7-16',span:'leaf chunk · turn 7–16',text:'再一段(sympy / sphinx 多题混合)。',tok:'3750 tok'},
+    {c:'elide',text:'⋯ 各 chunk 独立成块、按话题不稀释;攒够 condenseFanout 个 → 合成一个上层节点 ⋯'},
+    {c:'zone',z:'past',label:'临近过往轮 · 结构化压缩'},
+    {c:'user',tag:'用',meta:'turn 39 · pytest(过往轮)',text:'(过往轮)修 pytest mode 属性。',tok:'300 tok',zoneClass:'past',children:[
+      {c:'tool',tag:'⛭',meta:'tool_result · read · code(结构化压缩)',text:'[flowctx: code compressed 6200→180 chars · flowctx_retrieve(hash="c7f1…")]',tok:'44 tok',note:'compressed'},
+    ]},
+    {c:'zone',z:'cur',label:'当前轮 · 原文,零语义丢失'},
+    {c:'user',tag:'用',meta:'turn 40 · django-11066(当前轮)',text:'最后一题:content_type.save(update_fields=…)。',tok:'360 tok',ft:true,zoneClass:'cur',children:[
+      {c:'tool',tag:'⛭',meta:'tool_result · edit · 当前轮(原文,不压缩)',text:'定位 content_type.save,补 update_fields;原样保留供模型直接确认。',tok:'240 tok',ft:true},
+    ]},
+  ]},
+
+  // 阶段 5 — 终态:稳定的三档分层 + 持久化 + 聚合证据
+  5:{budget:[102812,44],ff:true,frozen:true,ftnote:true,dag:4,persist:true,rows:[
+    {c:'zone',z:'older',label:'更早历史 · condense 上层节点(有界)'},
+    {c:'sum',sum:true,depth:1,id:'d1-1-31',span:'turn 1–31 · 1 个 depth-1 节点 · 已落盘',text:'摘要块数量始终有界;原文全部 SQLite 持久化,flowctx_retrieve 可字节级还原。',tok:'2900 tok'},
+    {c:'zone',z:'past',label:'临近过往轮 · 结构化压缩(可还原)'},
+    {c:'user',tag:'用',meta:'turn 39 · pytest(过往轮)',text:'(过往轮)已完成,结果结构化压缩。',tok:'300 tok',zoneClass:'past',children:[
+      {c:'tool',tag:'⛭',meta:'tool_result · code(结构化压缩)',text:'[flowctx: code compressed 6200→180 chars · flowctx_retrieve(hash="c7f1…")]',tok:'44 tok',note:'compressed'},
+    ]},
+    {c:'zone',z:'cur',label:'当前轮 · 原文,零语义丢失'},
+    {c:'user',tag:'用',meta:'turn 40 · django-11066(当前轮)',text:'最后一题完成 —— 当前轮全程原文,分毫未压。',tok:'360 tok',ft:true,zoneClass:'cur'},
+  ]},
+};
+
+const dagNodes = [
+  {id:'d0-1-3',depth:0,tok:'3400 tok',span:'turn 1–3',raw:'leaf chunk · ≤40k raw',rawspan:'最旧一段',msgs:3,hash:'sha256:f65a…'},
+  {id:'d0-4-6',depth:0,tok:'3400 tok',span:'turn 4–6',raw:'leaf chunk · ≤40k raw',rawspan:'次旧一段',msgs:3,hash:'sha256:b4e2…'},
+  {id:'d0-7-16',depth:0,tok:'3750 tok',span:'turn 7–16',raw:'leaf chunk · ≤40k raw',rawspan:'再一段',msgs:10,hash:'sha256:9c1d…'},
+  {id:'d1-1-31',depth:1,tok:'2900 tok',span:'turn 1–31',raw:'condense 6 个 leaf chunk',rawspan:'上层节点',msgs:6,hash:'sha256:c7f1…',condensed:true},
+];
+
+// 第 5 步:真实 handoff note(turn 7,node d0-1-3;取自 summary-requests.thisrun.jsonl,略作精简)
+const HANDOFF_TEXT =
+  '# 交接笔记 (flowctx-handoff-note · d0-1-3)\n' +
+  '1. 任务:单 session 内三道题 —— django-10097(完成)· django-10554(进行中)· django-10973(未开始)。\n' +
+  '2. 有效做法:10097 已把 validators.py:97 正则 \\S+ → [^\\s:@/]+,59 个非法 URL 仍全部拒绝。\n' +
+  '3. 失败做法(勿重试):在 Query.clone() 里 clone combined_queries → 弄坏 test_union_with_values\n' +
+  '   (期望 (2,) 得到 (\'a\',2,1)),已回滚。另:python -m django test 报 protobuf 冲突,须用 tests/runtests.py。\n' +
+  '4. 关键标识符:Query.clone() · SQLCompiler.get_combinator_sql() · base_commit ddb2936…\n' +
+  '5. 文件:validators.py(已改)· sql/query.py(改后待重做)。\n' +
+  '6. 下一步:10554 换个修法 —— 在 _combinator_query 建 clone,而非 Query.clone()。';
+
+// ---- render ------------------------------------------------------------------
+const msgsEl=document.getElementById('msgs'), emptyEl=document.getElementById('empty'),
+      budgetEl=document.getElementById('budget'), barEl=document.getElementById('barfill'),
+      frozenEl=document.getElementById('frozen'), ftnoteEl=document.getElementById('ftnote'),
+      ffpill=document.getElementById('ffpill'), dagEl=document.getElementById('dag'),
+      dagcount=document.getElementById('dagcount');
+let current=-1;
+
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function rowHTML(r){
+  // zone divider — labels the tier of the rows that follow
+  if(r.c==='zone'){
+    return `<div class="zone"><span class="z ${r.z}">${esc(r.label)}</span><span class="ln"></span></div>`;
+  }
+  // elision separator — middle turns omitted for brevity
+  if(r.c==='elide'){
+    return `<div class="elide"><span class="ln"></span><span class="lbl">${esc(r.text)}</span><span class="ln"></span></div>`;
+  }
+  if(r.sum){
+    const handoff = r.handoff;
+    const depth = r.depth||0;
+    const text = handoff ? esc(HANDOFF_TEXT) : esc(r.text);
+    return `<div class="row sum${handoff?' handoff':''}${depth>0?' d1':''}">
+      <span class="tag">∑</span>
+      <div class="body">
+        <div class="head">摘要 · 深度 ${depth} <span style="color:var(--ink)">${r.id}</span>${handoff?' · 交接笔记':''}</div>
+        <div class="sub">${esc(r.span)}</div>
+        <div class="text">${text}</div>
+      </div><span class="tok">${r.tok}</span></div>`;
+  }
+  // tool_use — the assistant's outbound call (intermediate step). Renders the tool
+  // name + args verbatim; flowctx passes tool_use blocks through untouched (only the
+  // large RESULT is compressed), so this row is never compressed.
+  if(r.c==='tuse'){
+    const args = (r.args||[]).map(a=>`<span class="arg">${esc(a)}</span>`).join(', ');
+    const pair = r.paired ? ' paired' : '';
+    return `<div class="row tuse${pair}">
+      <span class="tag">${r.tag||'⚙'}</span>
+      <div class="body"><div class="meta">${esc(r.meta)}</div>
+        <div class="text"><span class="fn">${esc(r.fn)}</span>(${args})</div></div>
+      <span class="tok">${r.tok||''}</span><span class="call">TOOL_USE</span></div>`;
+  }
+  // FRESH TAIL 只标注「当前轮」的那一行(zoneClass==='cur' 的 turn 头);
+  // 其子行、历史轮一律不标(避免满屏 FRESH TAIL)。压缩标记(note)仍照常显示。
+  const badge = r.note
+    ? '<span class="ft" style="border-color:var(--purple);color:var(--purple)">'+r.note.toUpperCase()+'</span>'
+    : (r.zoneClass==='cur' ? F : '');
+  const pair = r.paired ? ' paired' : '';
+  return `<div class="row ${r.c}${pair}">
+    <span class="tag">${r.tag}</span>
+    <div class="body"><div class="meta">${esc(r.meta)}</div><div class="text">${esc(r.text)}</div></div>
+    <span class="tok">${r.tok}</span>${badge}</div>`;
+}
+
+// A turn group: a user (or sum) row that owns nested children (tool_use / tool_result /
+// assistant). Renders the header row, then indents its children under a colored rail so
+// each turn reads as one unit. `zoneClass` (cur/past) tints the rail.
+function turnHTML(r){
+  const head = rowHTML({...r, children:undefined});
+  const kids = (r.children||[]).map(rowHTML).join('');
+  const zc = r.zoneClass ? ' '+r.zoneClass : '';
+  return `<div class="turn${zc}">${head}<div class="kids">${kids}</div></div>`;
+}
+
+function render(step){
+  const s=scenes[step]; if(!s) return;
+  // budget: budget[1] = 装配量占「100k 门控」的百分比(便于看清折叠锯齿)
+  budgetEl.textContent = `${s.budget[1]}% → 100k 门控`;
+  budgetEl.classList.toggle('hot', !!s.hot);
+  barEl.style.width = s.budget[1]+'%';
+  barEl.classList.toggle('hot', !!s.hot);
+  ffpill.style.display = s.ff?'inline-block':'none';
+  frozenEl.style.display = s.frozen?'block':'none';
+  ftnoteEl.style.display = s.ftnote?'block':'none';
+  ftnoteEl.className = 'note dim';
+  // rows
+  emptyEl.style.display = s.empty?'block':'none';
+  let rows = Array.isArray(s.rows)?s.rows:[];
+  if(s.handoff) rows = rows.map(r=> r.id==='d0-1-3' ? {...r, handoff:true} : r);
+  // step-5 handoff: the single leaf at that point is d0-1-3 (the real first leaf)
+  // clear old dynamic rows/dividers (keep frozen marker + empty placeholder)
+  [...msgsEl.querySelectorAll('.row, .elide, .zone, .turn')].forEach(n=>n.remove());
+  rows.forEach((r,i)=>{
+    const div=document.createElement('div');
+    div.innerHTML = r.children ? turnHTML(r) : rowHTML(r);
+    const node=div.firstElementChild;
+    msgsEl.appendChild(node);
+    setTimeout(()=>node.classList.add('show'), 70*i+40);
+  });
+  // 冻结条:覆盖到「新鲜尾部」之上的前缀区域(示意,固定 60% 高度)
+  frozenEl.style.bottom = s.ff ? '38%' : '30%';
+  // dag
+  [...dagEl.children].forEach(n=>n.remove());
+  const shown = dagNodes.slice(0, s.dag);
+  const leaves = shown.filter(d=>!d.condensed);
+  const condNode = dagNodes.find(d=>d.condensed);
+  // showCondense:仅在终态(scene.persist)才把箭头 + d1 画出来;阶段 4 只展示 leaf chunk
+  const showCondense = !!s.persist && !!condNode;
+  const hasLeaves = leaves.length>0;
+  const TOTAL_LEAVES = 6;
+  dagcount.textContent = showCondense ? `${TOTAL_LEAVES} leaf chunk → 1 condense`
+    : (hasLeaves ? `${leaves.length}/${TOTAL_LEAVES} leaf chunk` : `${s.dag} 个节点`);
+  let di=0;
+  const addNode = (d)=>{
+    const el=document.createElement('div'); el.className='dnode'+(d.condensed?' cond':'');
+    el.innerHTML=`<div class="s"><div class="h">摘要 · 深度 ${d.depth} · ${d.tok}</div><div class="l">${d.id}<br>${d.span}<br>↳ ${d.msgs} ${d.condensed?'个子节点':'条消息'}</div></div>
+      <div class="edge"></div>
+      <div class="raw">${d.raw}<div class="l2">${d.rawspan}</div></div>
+      <div class="hashr">${d.hash}${s.persist?' · 已落盘':''}</div>`;
+    dagEl.appendChild(el);
+    const k=di++; setTimeout(()=>el.classList.add('show'), 120*k+120);
+  };
+  const addFiller = (html, cls)=>{
+    const el=document.createElement('div'); el.className='dfill '+(cls||'');
+    el.innerHTML=html; dagEl.appendChild(el);
+    const k=di++; setTimeout(()=>el.classList.add('show'), 120*k+120);
+  };
+  leaves.forEach(addNode);
+  if(showCondense){
+    // 仅终态:省略节点(其余 leaf chunk 凑足 6 个)+ 箭头指向 condense d1
+    const rest = TOTAL_LEAVES - leaves.length;
+    if(rest>0) addFiller(`<div class="ell">⋯</div><div class="elll">+${rest} 更多<br>leaf chunk<br><span class="dim2">共 ${TOTAL_LEAVES} 个</span></div>`, 'ellipsis');
+    addFiller(`<div class="arrow">→</div><div class="arrl">condense</div>`, 'arrow-wrap');
+    addNode(condNode);
+  }
+}
+
+// ---- scroll spy --------------------------------------------------------------
+const steps=[...document.querySelectorAll('.step')];
+const io=new IntersectionObserver((es)=>{
+  es.forEach(e=>{ if(e.isIntersecting){
+    const step=+e.target.dataset.step;
+    if(step!==current){ current=step; render(step); updateDots(step); }
+  }});
+},{threshold:.55});
+steps.forEach(s=>io.observe(s));
+
+// progress dots in each step
+function updateDots(step){
+  document.querySelectorAll('.dots').forEach(d=>{
+    if(d.children.length===0){ for(let i=0;i<steps.length;i++){const x=document.createElement('span');x.className='dot';d.appendChild(x);} }
+    [...d.children].forEach((c,i)=>c.classList.toggle('on', i===step));
+  });
+}
+document.getElementById('hint').style.opacity=1;
+window.addEventListener('scroll',()=>{document.getElementById('hint').style.opacity = window.scrollY>200?0:1;},{passive:true});
+render(0); updateDots(0);
+</script>
+</body>
+</html>
