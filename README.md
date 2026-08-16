@@ -264,6 +264,22 @@ dsh --profile web --dump-config | grep flowctx
         # 可选：保留尾部比例（默认 0.16）
         retainRatio: 0.16
 
+        # 可选：可逆工具结果投影（默认 true）。超过阈值的 tool result
+        # 会被结构化压缩，原文按 hash 存入 CompressionStore，可用
+        # flowctx_retrieve(hash="...") 取回。
+        projection: true
+        projectionThreshold: 1000      # 触发投影的 token 阈值
+
+        # 可选：分层 DAG 摘要（默认 true）。历史超阈值时后台异步折叠成
+        # 分层 summary nodes，用 flowctx_retrieve(node="...") 取回某层。
+        layeredSummary: true
+
+        # 可选：模型可编辑的工作记忆 scratchpad（默认 false）。开启后
+        # 注册 flowctx_scratch_append / _replace / _rethink 三个工具，
+        # 并把 <working_memory> 块注入进入 LLM 的消息流。
+        scratchpad: false
+        scratchpadMaxChars: 8000
+
         # 可选：SQLite 持久化目录。设置后，压缩引用、summary nodes
         # 与工作记忆 scratchpad 都会落盘到 <stateDir>/flowctx.sqlite，
         # 三者共用一个数据库句柄，进程重启后可恢复。
