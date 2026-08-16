@@ -1,9 +1,13 @@
-// CompressionStore — in-memory TTL+LRU store for reversible projection.
-// Stores the original content keyed by SHA-256[:24] hash; hands the model a
-// compact marker with flowctx_retrieve(hash=...) for reversibility.
-// Ported from flowctx (SQLite layer omitted; DSH session persistence handles durability).
+// CompressionStore — reversible projection store.
+// In-memory TTL+FIFO map (hot cache) + optional SQLite durable layer.
+// The SQLite layer (via KvStore) survives process restarts: retrieve() falls
+// back to it on a memory miss, re-warming the in-memory map on hit.
 
 import { createHash } from 'node:crypto'
+import path from 'node:path'
+import { KvStore } from './db/kv-store.ts'
+
+const REFS_NS = 'refs'
 
 export interface StoredEntry {
   hash: string
@@ -13,13 +17,26 @@ export interface StoredEntry {
   meta?: Record<string, unknown>
 }
 
+export interface CompressionStoreOptions {
+  maxEntries?: number
+  /** When set, originals are also persisted to `<dir>/flowctx.sqlite` (survives restart). */
+  dir?: string
+}
+
 export class CompressionStore {
   private map = new Map<string, StoredEntry>()
   private order: string[] = []
   private readonly maxEntries: number
+  private readonly kv?: KvStore
 
-  constructor(maxEntries = 500) {
-    this.maxEntries = maxEntries
+  constructor(options?: CompressionStoreOptions | number) {
+    const opts: CompressionStoreOptions =
+      typeof options === 'number' ? { maxEntries: options } : (options ?? {})
+    this.maxEntries = opts.maxEntries ?? 500
+    if (opts.dir) {
+      const kv = new KvStore(path.join(opts.dir, 'flowctx.sqlite'))
+      if (kv.available) this.kv = kv
+    }
   }
 
   static hash(text: string): string {
@@ -33,17 +50,34 @@ export class CompressionStore {
     if (!this.map.has(hash)) this.order.push(hash)
     this.map.set(hash, { hash, original, storedAtMs: nowMs, ttlMs, meta })
     this.evictIfNeeded()
+    if (this.kv) {
+      const expiresAtMs = ttlMs <= 0 ? nowMs : nowMs + ttlMs
+      this.kv.putSync(REFS_NS, hash, original, expiresAtMs)
+    }
     return hash
   }
 
   retrieve(hash: string): string | null {
     const e = this.map.get(hash)
-    if (!e) return null
-    if (e.ttlMs > 0 && Date.now() - e.storedAtMs > e.ttlMs) {
-      this.map.delete(hash)
-      return null
+    if (e) {
+      if (e.ttlMs > 0 && Date.now() - e.storedAtMs > e.ttlMs) {
+        this.map.delete(hash)
+        // fall through to SQLite
+      } else {
+        return e.original
+      }
     }
-    return e.original
+    // Memory miss → SQLite durable layer (post-restart path).
+    if (this.kv) {
+      const original = this.kv.get(REFS_NS, hash)
+      if (original !== null) {
+        if (!this.map.has(hash)) this.order.push(hash)
+        this.map.set(hash, { hash, original, storedAtMs: Date.now(), ttlMs: Number.MAX_SAFE_INTEGER })
+        this.evictIfNeeded()
+        return original
+      }
+    }
+    return null
   }
 
   private evictIfNeeded(): void {

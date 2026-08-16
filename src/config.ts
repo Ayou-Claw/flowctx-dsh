@@ -74,6 +74,14 @@ export interface FlowCtxDshConfig {
   scratchpad?: boolean
   /** Max chars for the scratchpad block. Default: 8000. */
   scratchpadMaxChars?: number
+
+  // ---- flowctx: persistence ----
+  /**
+   * Directory for SQLite persistence of compression refs and summary nodes.
+   * When set, CompressionStore and summary nodes survive process restarts.
+   * Typical value: ~/.dsh/profiles/web/flowctx-state
+   */
+  stateDir?: string
 }
 
 export interface ResolvedFlowCtxConfig {
@@ -99,6 +107,7 @@ export interface ResolvedFlowCtxConfig {
   projectionTtlSeconds: number
   scratchpad: boolean
   scratchpadMaxChars: number
+  stateDir: string | undefined
 }
 
 function num(v: unknown, fallback: number, min: number, max: number): number {
@@ -157,5 +166,6 @@ export function resolveConfig(raw: FlowCtxDshConfig): ResolvedFlowCtxConfig {
     projectionTtlSeconds: num(c.projectionTtlSeconds, CONFIG_DEFAULTS.projectionTtlSeconds, 60, 2592000),
     scratchpad: bool(c.scratchpad, CONFIG_DEFAULTS.scratchpad),
     scratchpadMaxChars: num(c.scratchpadMaxChars, CONFIG_DEFAULTS.scratchpadMaxChars, 500, 100000),
+    stateDir: typeof c.stateDir === 'string' && c.stateDir.length > 0 ? c.stateDir : undefined,
   }
 }

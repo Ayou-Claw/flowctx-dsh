@@ -52,7 +52,6 @@ flowctx-dsh 是面向 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/ha
 
 它不把上下文看成"装满就截断"的缓冲区，而是把一次 AI 编程会话看成一段有纵深的工作记忆：越近的信息越清晰，越远的信息越凝练，但不真正遗忘。
 
-- GitHub（DSH 版）：https://github.com/Ayou-Claw/flowctx-dsh
 - 流程演示：[docs/flow-demo-zh.html](https://ayou-claw.github.io/flowctx-dsh/docs/flow-demo-zh.html)
 
 ---
@@ -142,14 +141,16 @@ flowctx-dsh 建立在 DSH 已有的三道防线之上：
 [第二道] ToolResultPruner     超长历史 tool/result 节点 → head+tail 裁剪，中间标记
     │
     ▼
-[第三道] BasicCompactionEngine（flowctx-dsh 替换摘要提示词）
-    │   agent/pre-step：历史 token 超阈值 → LLM 摘要 → 工程师交接笔记
-    │   agent/request-error：CONTEXT_WINDOW_EXCEEDED → prune + 摘要 + 重试
+[第三道] BasicCompactionEngine
+    │   agent/pre-step：历史 token 超阈值 → LLM 摘要
+    │                                           ↑
+    │                              flowctx-dsh 替换此处的摘要提示词
+    │                              → 输出工程师交接笔记而非通用摘要
     ▼
 LLM 请求
 ```
 
-flowctx-dsh 只替换最后一层的摘要指令——把通用要点摘要换成结构化的六节工程师交接笔记。其余所有机制（压力检测、范围选择、KV cache 重放、事务管理、溢出恢复）原封不动继承自 `BasicCompactionEngine`。
+flowctx-dsh 只替换最后一层的摘要提示词。压力检测、范围选择、KV cache 重放、事务管理、溢出恢复（`agent/request-error`）等所有机制原封不动继承自 `BasicCompactionEngine`。
 
 ---
 

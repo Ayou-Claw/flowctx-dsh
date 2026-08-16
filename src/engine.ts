@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { BlockAssembler, createUserMessage, contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
@@ -7,6 +8,7 @@ import type { PostToolDecision, ToolExecution, ToolExecutionResult } from '@deep
 import { HANDOFF_INSTRUCTION } from './prompt.ts'
 import { type FlowCtxDshConfig, resolveConfig, type ResolvedFlowCtxConfig } from './config.ts'
 import { CompressionStore } from './store.ts'
+import { KvStore } from './db/kv-store.ts'
 import { Scratchpad } from './scratchpad.ts'
 import { projectBlock } from './projection.ts'
 import { estimateTokens } from './tokens.ts'
@@ -20,6 +22,8 @@ import {
 
 type SummarizeInput = Parameters<BasicCompactionEngine['summarize']>[0]
 type SummarizeAgent = Parameters<BasicCompactionEngine['summarize']>[1]
+
+const SUMMARY_NS = 'summary-nodes'
 
 interface SessionMeta {
   summaryNodes: SummaryNode[]
@@ -35,16 +39,19 @@ interface SessionMeta {
  *
  * Extends BasicCompactionEngine with:
  *   1. Engineer handoff-note summarization style (override summarize())
- *   2. Multi-layer DAG compaction (layered leaf+condense drain loop)
+ *   2. Multi-layer DAG compaction (layered leaf+condense drain loop, fire-and-forget)
  *   3. Reversible tool-result projection (tools/post-execute hook)
  *   4. Working-memory scratchpad tools (flowctx_scratch_*)
  *   5. flowctx_retrieve tool for hash/node lookups
+ *   6. SQLite persistence for compression refs and summary nodes (survives restart)
  */
 export class FlowCtxCompactionEngine extends BasicCompactionEngine {
   private readonly _fcfg: ResolvedFlowCtxConfig
   private readonly _store: CompressionStore
   private readonly _scratch: Scratchpad
   private readonly _sessionMeta = new Map<string, SessionMeta>()
+  /** Durable KvStore for summary nodes (undefined when stateDir not configured). */
+  private readonly _summaryStore?: KvStore
 
   constructor(
     ctx: ConstructorParameters<typeof BasicCompactionEngine>[0],
@@ -55,10 +62,17 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
       condenseFanout: _cf, maxSummaryDepth: _md, summaryKeepRecentTurns: _sk,
       freshTailWindow: _fw, projection: _pr, projectionThreshold: _pt,
       projectionTtlSeconds: _ps, scratchpad: _sc, scratchpadMaxChars: _smc,
-      ...baseConfig } = pluginConfig
+      stateDir: _sd, ...baseConfig } = pluginConfig
     super(ctx, baseConfig)
     this._fcfg = cfg
-    this._store = new CompressionStore()
+
+    // SQLite persistence: CompressionStore refs + summary nodes.
+    if (cfg.stateDir) {
+      const kv = new KvStore(path.join(cfg.stateDir, 'flowctx.sqlite'))
+      if (kv.available) this._summaryStore = kv
+    }
+
+    this._store = new CompressionStore(cfg.stateDir ? { dir: cfg.stateDir } : undefined)
     this._scratch = new Scratchpad(cfg.scratchpadMaxChars)
     this._registerProjection()
     this._registerTools()
@@ -136,15 +150,47 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
     }
   }
 
-  // ---- Layered DAG drain via agent/pre-step ----
+  // ---- Layered DAG drain via agent/pre-step (fire-and-forget) ----
 
   private _getOrCreateMeta(sessionId: string): SessionMeta {
     let meta = this._sessionMeta.get(sessionId)
     if (!meta) {
-      meta = { summaryNodes: [], leafCursorMsg: 0, leafCursorTurn: 0, summaryGen: 0, summaryInFlightNodes: new Set() }
+      // Reload persisted summary nodes from SQLite on first access.
+      const persisted = this._loadPersistedNodes(sessionId)
+      meta = {
+        summaryNodes: persisted,
+        leafCursorMsg: persisted.length > 0
+          ? Math.max(...persisted.map((n) => n.coverEndMsgCount ?? 0))
+          : 0,
+        leafCursorTurn: persisted.length > 0
+          ? Math.max(...persisted.map((n) => n.coverEndTurn))
+          : 0,
+        summaryGen: 0,
+        summaryInFlightNodes: new Set(),
+      }
       this._sessionMeta.set(sessionId, meta)
     }
     return meta
+  }
+
+  private _loadPersistedNodes(sessionId: string): SummaryNode[] {
+    if (!this._summaryStore) return []
+    try {
+      const raw = this._summaryStore.get(SUMMARY_NS, sessionId)
+      if (!raw) return []
+      return JSON.parse(raw) as SummaryNode[]
+    } catch {
+      return []
+    }
+  }
+
+  private _persistNodes(sessionId: string, nodes: SummaryNode[]): void {
+    if (!this._summaryStore) return
+    try {
+      this._summaryStore.putSync(SUMMARY_NS, sessionId, JSON.stringify(nodes), null)
+    } catch {
+      // best-effort
+    }
   }
 
   /** Extract surface messages from session events in surface order. */
@@ -186,14 +232,16 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
 
       const leafId = plan.leaf ? nodeId(0, plan.leaf.startTurn, plan.leaf.endTurn) : undefined
       if (plan.leaf || plan.condense) {
-        if (!leafId || !plan.condense && meta.summaryInFlightNodes.has(leafId)) {
-          // skip: already in flight
-        } else {
+        // Dedup: skip if the only pending work is a leaf already in flight.
+        const alreadyInFlight = leafId && !plan.condense && meta.summaryInFlightNodes.has(leafId)
+        if (!alreadyInFlight) {
+          // Supersede any running drain for this session.
           meta.summaryAbort?.abort()
           const gen = meta.summaryGen + 1
           meta.summaryGen = gen
           const abort = new AbortController()
           meta.summaryAbort = abort
+          // Fire-and-forget: drain runs off the pre-step critical path.
           void this._runLayeredDrain(sessionId, agent, messages, frozenStart, gen, abort.signal)
         }
       }
@@ -221,6 +269,7 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
   ): Promise<void> {
     let foldedLeaves = 0
 
+    // Serial leaf drain: fold every foldable chunk this pass.
     for (;;) {
       if (signal.aborted) break
       const meta = this._sessionMeta.get(sessionId)
@@ -240,6 +289,7 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
       if (outcome === 'committed') foldedLeaves++
     }
 
+    // Condense pass: runs after all leaves this generation are folded.
     if (!signal.aborted) {
       const meta = this._sessionMeta.get(sessionId)
       if (meta && meta.summaryGen === gen) {
@@ -284,7 +334,6 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
       if (!target) throw new Error('no model target')
       const maxTokens = this._fcfg.summaryMaxTokens ?? this.config.maxTokens
 
-      // Build pseudo-messages for the slice: flatten to text blocks + instruction.
       const callMessages: UserMessage[] = [
         ...slice.map((m) => {
           const textBlocks = m.content.filter((b) => b.type === 'text')
@@ -341,6 +390,7 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
       }
       currentMeta.summaryNodes = [...currentMeta.summaryNodes.filter((n) => n.id !== id), node]
         .sort((a, b) => a.coverStartTurn - b.coverStartTurn)
+      this._persistNodes(sessionId, currentMeta.summaryNodes)
       return 'committed'
     }
     return 'skipped'
@@ -409,6 +459,7 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
       }
       currentMeta.summaryNodes = [...currentMeta.summaryNodes.filter((n) => n.id !== id), node]
         .sort((a, b) => a.coverStartTurn - b.coverStartTurn)
+      this._persistNodes(sessionId, currentMeta.summaryNodes)
       return 'committed'
     }
     return 'skipped'
