@@ -78,7 +78,11 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
     this._scratch = new Scratchpad(cfg.scratchpadMaxChars)
     this._registerProjection()
     this._registerTools()
-    if (cfg.layeredSummary) this._registerLayeredCompaction()
+    // The pre-step hook drives two independent features: layered DAG drain
+    // (layeredSummary) and working-memory injection (scratchpad). Register it
+    // when EITHER is enabled so scratchpad content reaches the LLM even with
+    // layeredSummary off.
+    if (cfg.layeredSummary || cfg.scratchpad) this._registerPreStep()
   }
 
   // ---- Summarize override: engineer handoff-note prompt ----
@@ -210,8 +214,10 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
     return messages
   }
 
-  private _registerLayeredCompaction(): void {
+  private _registerPreStep(): void {
     const { ctx } = this
+    const layered = this._fcfg.layeredSummary
+    const scratchpad = this._fcfg.scratchpad
 
     ctx.on('agent/pre-step', async (
       { agent, signal }: { agent: Agent; signal: AbortSignal },
@@ -221,43 +227,60 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
       if (decision.kind === 'reject' || signal.aborted) return decision
 
       const sessionId = agent.session.id
-      const meta = this._getOrCreateMeta(sessionId)
-      const messages = this._surfaceMessages(agent)
-      const frozenStart = Math.max(0, messages.length - this._fcfg.freshTailWindow)
+      const injections: UserMessage[] = []
 
-      const plan = planSummaryJobs(messages, frozenStart, meta.summaryNodes, meta.leafCursorMsg, {
-        leafChunkTokens: this._fcfg.leafChunkTokens,
-        condenseFanout: this._fcfg.condenseFanout,
-        maxSummaryDepth: this._fcfg.maxSummaryDepth,
-        summaryKeepRecentTurns: this._fcfg.summaryKeepRecentTurns,
-      })
+      if (layered) {
+        const meta = this._getOrCreateMeta(sessionId)
+        const messages = this._surfaceMessages(agent)
+        const frozenStart = Math.max(0, messages.length - this._fcfg.freshTailWindow)
 
-      const leafId = plan.leaf ? nodeId(0, plan.leaf.startTurn, plan.leaf.endTurn) : undefined
-      if (plan.leaf || plan.condense) {
-        // Dedup: skip if the only pending work is a leaf already in flight.
-        const alreadyInFlight = leafId && !plan.condense && meta.summaryInFlightNodes.has(leafId)
-        if (!alreadyInFlight) {
-          // Supersede any running drain for this session.
-          meta.summaryAbort?.abort()
-          const gen = meta.summaryGen + 1
-          meta.summaryGen = gen
-          const abort = new AbortController()
-          meta.summaryAbort = abort
-          // Fire-and-forget: drain runs off the pre-step critical path.
-          void this._runLayeredDrain(sessionId, agent, messages, frozenStart, gen, abort.signal)
+        const plan = planSummaryJobs(messages, frozenStart, meta.summaryNodes, meta.leafCursorMsg, {
+          leafChunkTokens: this._fcfg.leafChunkTokens,
+          condenseFanout: this._fcfg.condenseFanout,
+          maxSummaryDepth: this._fcfg.maxSummaryDepth,
+          summaryKeepRecentTurns: this._fcfg.summaryKeepRecentTurns,
+        })
+
+        const leafId = plan.leaf ? nodeId(0, plan.leaf.startTurn, plan.leaf.endTurn) : undefined
+        if (plan.leaf || plan.condense) {
+          // Dedup: skip if the only pending work is a leaf already in flight.
+          const alreadyInFlight = leafId && !plan.condense && meta.summaryInFlightNodes.has(leafId)
+          if (!alreadyInFlight) {
+            // Supersede any running drain for this session.
+            meta.summaryAbort?.abort()
+            const gen = meta.summaryGen + 1
+            meta.summaryGen = gen
+            const abort = new AbortController()
+            meta.summaryAbort = abort
+            // Fire-and-forget: drain runs off the pre-step critical path.
+            void this._runLayeredDrain(sessionId, agent, messages, frozenStart, gen, abort.signal)
+          }
+        }
+
+        // Collect active summary node placeholders.
+        for (const node of activeSummaryNodes(meta.summaryNodes)) {
+          injections.push(createUserMessage({
+            content: [{ type: 'text', text: buildLayeredPlaceholderText(node) }],
+            source: { kind: 'plugin', plugin: 'flowctx-dsh' },
+          }))
         }
       }
 
-      // Inject active summary node placeholders into the entering messages.
-      const active = activeSummaryNodes(meta.summaryNodes)
-      if (!active.length) return decision
-      const placeholders: UserMessage[] = active.map((node) =>
-        createUserMessage({
-          content: [{ type: 'text', text: buildLayeredPlaceholderText(node) }],
-          source: { kind: 'plugin', plugin: 'flowctx-dsh' },
-        }),
-      )
-      return { kind: 'enter', messages: [...placeholders, ...decision.messages] }
+      // Inject the model-editable working-memory scratchpad, if non-empty.
+      // Placed after summary placeholders so the freshest working memory is
+      // closest to the live tail of the conversation.
+      if (scratchpad) {
+        const rendered = this._scratch.render(sessionId)
+        if (rendered) {
+          injections.push(createUserMessage({
+            content: [{ type: 'text', text: rendered }],
+            source: { kind: 'plugin', plugin: 'flowctx-dsh' },
+          }))
+        }
+      }
+
+      if (!injections.length) return decision
+      return { kind: 'enter', messages: [...injections, ...decision.messages] }
     })
   }
 

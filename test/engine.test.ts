@@ -66,6 +66,11 @@ describe('resolveTarget()', () => {
 // FlowCtxCompactionEngine — requires a cordis Context with service stubs
 // ---------------------------------------------------------------------------
 
+interface RegisteredTool {
+  name: string
+  execute: (args: Record<string, unknown>, exec?: unknown) => Promise<unknown>
+}
+
 /** Build a minimal cordis Context with the services BasicCompactionEngine needs. */
 function makeCtx() {
   const ctx = new Context()
@@ -74,12 +79,27 @@ function makeCtx() {
   const streamMock = vi.fn(async function* (_options: unknown) {
     // default: no chunks
   })
+  const tools: RegisteredTool[] = []
   ctx.provide('llm', { stream: streamMock } as never)
   ctx.provide('tokenMeter', {} as never)
   ctx.provide('sessions', {} as never)
-  ctx.provide('tools', { register: vi.fn(), execute: vi.fn() } as never)
+  ctx.provide('tools', {
+    register: vi.fn((t: RegisteredTool) => { tools.push(t) }),
+    execute: vi.fn(),
+  } as never)
 
-  return { ctx, streamMock }
+  return { ctx, streamMock, tools }
+}
+
+/** Retrieve a registered lifecycle listener by event name from cordis internals. */
+function preStepHandler(ctx: Context): (
+  arg: { agent: unknown; signal: AbortSignal },
+  next: () => Promise<unknown>,
+) => Promise<{ kind: string; messages?: Array<{ role: string; content: Array<{ type: string; text?: string }> }> }> {
+  const hooks = (ctx as unknown as { events: { _hooks: Record<string, Array<{ callback: unknown }>> } }).events._hooks
+  const list = hooks['agent/pre-step']
+  if (!list || !list.length) throw new Error('no agent/pre-step listener registered')
+  return list[list.length - 1].callback as never
 }
 
 function makeAgent(opts: {
@@ -242,5 +262,99 @@ describe('FlowCtxCompactionEngine', () => {
       model: 'claude-opus-5',
     })
     expect(result.provider).toBe('anthropic')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Working-memory scratchpad injection via agent/pre-step
+// ---------------------------------------------------------------------------
+
+describe('scratchpad pre-step injection', () => {
+  const SESSION = 'test-session'
+
+  function accept(messages: Array<{ role: string; content: unknown[] }>) {
+    return { kind: 'enter' as const, messages }
+  }
+
+  it('does NOT register agent/pre-step when both scratchpad and layeredSummary are off', () => {
+    const { ctx } = makeCtx()
+    new FlowCtxCompactionEngine(ctx, { auto: false, layeredSummary: false, scratchpad: false })
+    const hooks = (ctx as unknown as { events: { _hooks: Record<string, unknown[]> } }).events._hooks
+    expect(hooks['agent/pre-step']).toBeUndefined()
+  })
+
+  it('registers agent/pre-step when scratchpad is on even if layeredSummary is off', () => {
+    const { ctx } = makeCtx()
+    new FlowCtxCompactionEngine(ctx, { auto: false, layeredSummary: false, scratchpad: true })
+    expect(() => preStepHandler(ctx)).not.toThrow()
+  })
+
+  it('does not inject when the scratchpad is empty', async () => {
+    const { ctx } = makeCtx()
+    new FlowCtxCompactionEngine(ctx, { auto: false, layeredSummary: false, scratchpad: true })
+    const handler = preStepHandler(ctx)
+
+    const original = accept([{ role: 'user', content: [{ type: 'text', text: 'live' }] }])
+    const decision = await handler(
+      { agent: { session: { id: SESSION } }, signal: new AbortController().signal },
+      async () => original,
+    )
+    // No scratchpad content -> pass the original decision through untouched.
+    expect(decision).toBe(original)
+  })
+
+  it('injects the <working_memory> block once the scratchpad has content', async () => {
+    const { ctx, tools } = makeCtx()
+    new FlowCtxCompactionEngine(ctx, { auto: false, layeredSummary: false, scratchpad: true })
+
+    // Write to the scratchpad through the registered tool (same session key path).
+    const appendTool = tools.find((t) => t.name === 'flowctx_scratch_append')!
+    await appendTool.execute({ text: 'remember: fix the drain loop' }, { agent: { session: { id: SESSION } } })
+
+    const handler = preStepHandler(ctx)
+    const original = accept([{ role: 'user', content: [{ type: 'text', text: 'live turn' }] }])
+    const decision = await handler(
+      { agent: { session: { id: SESSION } }, signal: new AbortController().signal },
+      async () => original,
+    )
+
+    expect(decision.kind).toBe('enter')
+    const injected = decision.messages!
+    // Injected working-memory block comes first, live message preserved last.
+    expect(injected).toHaveLength(2)
+    const firstText = injected[0].content.find((b) => b.type === 'text')!.text!
+    expect(firstText).toContain('<working_memory')
+    expect(firstText).toContain('remember: fix the drain loop')
+    expect(injected[1].content[0].text).toBe('live turn')
+  })
+
+  it('does not touch a rejected decision', async () => {
+    const { ctx, tools } = makeCtx()
+    new FlowCtxCompactionEngine(ctx, { auto: false, layeredSummary: false, scratchpad: true })
+    const appendTool = tools.find((t) => t.name === 'flowctx_scratch_append')!
+    await appendTool.execute({ text: 'something' }, { agent: { session: { id: SESSION } } })
+
+    const handler = preStepHandler(ctx)
+    const rejected = { kind: 'reject' as const }
+    const decision = await handler(
+      { agent: { session: { id: SESSION } }, signal: new AbortController().signal },
+      async () => rejected,
+    )
+    expect(decision).toBe(rejected)
+  })
+
+  it('scoped per session: session B does not see session A working memory', async () => {
+    const { ctx, tools } = makeCtx()
+    new FlowCtxCompactionEngine(ctx, { auto: false, layeredSummary: false, scratchpad: true })
+    const appendTool = tools.find((t) => t.name === 'flowctx_scratch_append')!
+    await appendTool.execute({ text: 'A-only note' }, { agent: { session: { id: 'sess-A' } } })
+
+    const handler = preStepHandler(ctx)
+    const original = accept([{ role: 'user', content: [{ type: 'text', text: 'B live' }] }])
+    const decision = await handler(
+      { agent: { session: { id: 'sess-B' } }, signal: new AbortController().signal },
+      async () => original,
+    )
+    expect(decision).toBe(original)
   })
 })
