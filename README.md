@@ -4,29 +4,29 @@
 
 # flowctx-dsh
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/harness) 的本地优先上下文引擎：当前任务原文保留，临近历史可逆压缩，更早历史折叠成工程师交接笔记 —— 关键材料始终可恢复。
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/harness) 的本地优先上下文引擎。当前任务保留原文，临近历史可逆压缩，更早历史折叠为工程师交接笔记，关键材料始终可恢复。
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![version](https://img.shields.io/badge/version-0.1.0-informational.svg)](./package.json)
 [![DSH](https://img.shields.io/badge/DeepSeek%20Harness-ContextEngine-6c5ce7.svg)](https://github.com/deepseek-ai/harness)
 [![tests](https://img.shields.io/badge/tests-129%20passing-success.svg)](#开发)
 
-[核心能力](#核心能力) · [为什么需要它](#为什么需要它) · [集成架构](#dsh-原生集成) · [安装](#安装) · [配置](#配置) · [评测](#评测) · [流程演示](https://ayou-claw.github.io/flowctx-dsh/docs/flow-demo-zh.html)
+[核心能力](#核心能力) · [为什么需要它](#为什么需要它) · [三档记忆模型](#三档记忆模型) · [集成架构](#dsh-原生集成) · [评测](#评测) · [安装](#安装) · [配置](#配置) · [适用场景](#适用场景) · [流程演示](https://ayou-claw.github.io/flowctx-dsh/docs/flow-demo-zh.html)
 
 </div>
 
 ---
 
 > [!TIP]
-> **一句话理解**：flowctx-dsh 不把上下文当成"装满就截断"的缓冲区，而是把一次 AI 编程会话看成一段有纵深的工作记忆 —— **越近的信息越清晰，越远的信息越凝练，但不真正遗忘**。
+> **核心理念**：flowctx-dsh 不把上下文视为「装满即截断」的缓冲区，而是将一次 AI 编程会话看作一段有纵深的工作记忆——**越近的信息越清晰，越远的信息越凝练，但均不被真正遗忘**。
 
-它在 `dsh-compaction-basic` 之上做加性扩展：完整继承压力检测、范围选择、KV-cache 重放、事务管理与溢出恢复，只把"通用摘要"换成面向软件工程的交接笔记，并新增三条能力。**全部扩展可逐项开关；全关时行为等同于换了摘要风格的 `dsh-compaction-basic`。**
+flowctx-dsh 在 `dsh-compaction-basic` 之上做加性扩展：完整继承其压力检测、范围选择、KV-cache 重放、事务管理与溢出恢复能力，仅将「通用摘要」替换为面向软件工程的交接笔记，并新增三项能力。**所有扩展均可逐项开关；全部关闭时，其行为等同于仅调整了摘要风格的 `dsh-compaction-basic`。**
 
 ---
 
 ## 核心能力
 
-flowctx-dsh 提供四项能力，覆盖工具结果返回 → 历史折叠 → 主动取回 → 工作记忆的完整链路：
+flowctx-dsh 提供四项能力，覆盖「工具结果返回 → 历史折叠 → 主动取回 → 工作记忆」的完整链路：
 
 | # | 能力 | Hook / 触发点 | 作用 | 默认 |
 |:-:|------|--------------|------|:----:|
@@ -35,22 +35,22 @@ flowctx-dsh 提供四项能力，覆盖工具结果返回 → 历史折叠 → �
 | 3 | **可逆工具结果投影** | `tools/post-execute` | 超阈值 tool result 结构化压缩，原文按 hash 存入 CompressionStore，可 byte-exact 取回 | ✅ 开 |
 | 4 | **可编辑工作记忆** | `flowctx_scratch_*` 工具 | 模型自维护的 `<working_memory>` 块，注入进入 LLM 的消息流 | ⚪ 关 |
 
-配套工具 **`flowctx_retrieve`**：按 `hash` 取回被投影压缩的原文，或按 `node` id 取回某一层交接笔记。
+配套工具 **`flowctx_retrieve`**：按 `hash` 取回被投影压缩的原文，或按 `node` id 取回指定层级的交接笔记。
 
 <details>
-<summary><b>展开：每项能力的设计要点</b></summary>
+<summary><b>展开查看：各项能力的设计要点</b></summary>
 
 ### 1 · 工程师交接笔记摘要
-通用摘要倾向保留"成功方向"，把已排除的路线一笔带过，导致 agent 重走弯路；session id / commit hash / 函数名 / 文件路径也常被改写成自然语言，引用时出错。交接笔记用固定 6 段结构把这些**专节保留**（详见[交接笔记格式](#工程师交接笔记格式)）。
+通用摘要倾向于保留「成功方向」，对已排除的路线一笔带过，易导致 Agent 重走弯路；session id、commit hash、函数名、文件路径等也常被改写为自然语言，引用时出错。交接笔记以固定 6 段结构对这些信息**分节保留**（详见[交接笔记格式](#工程师交接笔记格式)）。
 
 ### 2 · 分层 DAG 摘要（后台异步）
-与 DSH 原生 Layer 2 的**同步**压缩不同：`agent/pre-step` 只做一次纯函数规划，真正的摘要 LLM 调用在关键路径之外异步执行，不阻塞当前步骤。同一会话若在摘要途中再次触发，旧任务被 generation 计数器 + `AbortController` 主动取代，避免重复劳动。每个 active summary node 作为独立 placeholder 注入，早期话题各占一块，而非被单条滚动摘要稀释。
+与 DSH 原生 Layer 2 的**同步**压缩不同：`agent/pre-step` 仅执行一次纯函数规划，真正的摘要 LLM 调用在关键路径之外异步执行，不阻塞当前步骤。同一会话若在摘要过程中再次触发，旧任务将由 generation 计数器与 `AbortController` 主动取代，避免重复计算。每个 active summary node 作为独立 placeholder 注入，使早期话题各占一节，而非被单条滚动摘要稀释。
 
 ### 3 · 可逆工具结果投影
-结构化压缩不是删减：原文存本地 CompressionStore，上下文里留带 hash 的 marker。大段日志、大文件片段、失败尝试都能折叠，需要时 `flowctx_retrieve(hash="…")` byte-exact 取回。压缩只是 `assemble()` 阶段的**读时投影**，不破坏真实会话，宿主 transcript 始终保留未压缩原文。
+结构化压缩并非删减：原文存入本地 CompressionStore，上下文中仅保留带 hash 的 marker。大段日志、大文件片段、失败尝试均可折叠，需要时通过 `flowctx_retrieve(hash="…")` 按字节精确（byte-exact）取回。压缩仅发生在 `assemble()` 阶段的**读时投影**，不破坏真实会话，宿主 transcript 始终保留未压缩原文。
 
 ### 4 · 可编辑工作记忆 scratchpad
-开启后注册 `flowctx_scratch_append` / `_replace` / `_rethink` 三个工具，模型可主动维护一块 `<working_memory>`（当前目标、待办、不可遗忘的关键结果），每步注入回消息流。配置 `stateDir` 后随其他两个存储一并落盘，重启可恢复。
+开启后注册 `flowctx_scratch_append`、`_replace`、`_rethink` 三个工具，模型可主动维护一块 `<working_memory>`（记录当前目标、待办事项、不可遗忘的关键结果），并在每步注入回消息流。配置 `stateDir` 后随其余两类存储一并落盘，进程重启后可恢复。
 
 </details>
 
@@ -58,7 +58,7 @@ flowctx-dsh 提供四项能力，覆盖工具结果返回 → 历史折叠 → �
 
 ## 为什么需要它
 
-让 AI Agent 处理复杂代码任务时，常见的失败模式是：聊到后面上下文越来越长、工具输出越来越多，agent 开始**重复搜索、忘记约束、重走已排除的路线**。这通常不是"模型不聪明"，而是上下文窗口管理出了问题。
+AI Agent 处理复杂代码任务时，一种常见的失败模式是：随着对话推进，上下文不断变长、工具输出不断累积，Agent 开始**重复搜索、遗忘约束、重走已排除的路线**。这通常并非「模型能力不足」，而是上下文窗口管理出现了问题。
 
 DeepSeek Harness 已内置三层递进的上下文管理机制：
 
@@ -73,7 +73,7 @@ DeepSeek Harness 已内置三层递进的上下文管理机制：
 | **Layer 2** 在 `pre-step` **同步阻塞**，长历史每次触发都在关键路径插入一次完整 LLM 请求 | 能力 2：分层摘要后台 fire-and-forget，不阻塞 |
 | **Layer 2** 触发**被动兜底**，无法在工具结果刚返回时干预 | 能力 3：`tools/post-execute` 即时结构化投影 |
 
-> 软件工程任务里的"早期信息"并不一定过时：一条错误日志、一个函数签名、一个失败 patch、一个隐藏约束，都可能是后续修复的关键。**记忆应当渐远，而不是骤断。**
+> 软件工程任务中的「早期信息」未必已经过时：一条错误日志、一个函数签名、一次失败的 patch、一项隐藏约束，都可能是后续修复的关键。**记忆应当渐远，而非骤断。**
 
 ---
 
@@ -87,21 +87,21 @@ flowctx-dsh 按信息与当前任务的距离，把上下文分成三档：
 | **临近历史** | 结构化压缩（能力 3） | 大段工具输出压缩成可恢复引用 |
 | **更早历史** | 后台摘要（能力 1+2） | 折叠成分层交接笔记，保留失败路径与关键标识符 |
 
-**当前正在做的事永远不被压缩** —— agent 刚获得的代码片段、错误输出会原样进入模型，避免"刚看完就忘"；离当前更远的内容才被确定性投影或摘要折叠，既省 token 又保留可恢复路径。
+**当前正在进行的工作永不被压缩**——Agent 刚获取的代码片段、错误输出会原样进入模型，避免「刚读完即遗忘」；只有距离当前更远的内容，才会被确定性投影或摘要折叠，从而在节省 token 的同时保留可恢复路径。
 
 ### KV-cache 友好
 
-长上下文不仅更贵，也拖慢推理。flowctx-dsh 在三个目标间平衡，尽量维持字节稳定的 KV-cache 前缀：
+长上下文不仅成本更高，也会拖慢推理。flowctx-dsh 在以下三个目标间取得平衡，尽可能维持字节稳定的 KV-cache 前缀：
 
-1. 当前任务的原始材料直接可用；
+1. 当前任务的原始材料可直接使用；
 2. 历史材料可压缩、可恢复、可审计；
-3. 上下文前缀尽可能稳定，照顾缓存命中（确定性压缩、分层折叠、读时投影，避免反复重写）。
+3. 上下文前缀尽可能稳定，以提升缓存命中率（采用确定性压缩、分层折叠、读时投影，避免反复重写）。
 
 ---
 
 ## DSH 原生集成
 
-标 `[+]` 的是 flowctx-dsh 在 DSH 三道防线之上新增的能力：
+以下流程中，标注 `[+]` 者为 flowctx-dsh 在 DSH 三道防线之上新增的能力：
 
 ```
 工具调用返回
@@ -139,7 +139,7 @@ LLM 请求
 
 ## 工程师交接笔记格式
 
-摘要不再是通用叙述，而是固定 6 段结构：
+摘要不再是通用叙述，而是采用固定的 6 段结构：
 
 ```
 ## TASK / GOAL          当前任务与目标
@@ -157,7 +157,7 @@ LLM 请求
 | 文件路径 | 可能省略 | **显式列出**（FILE ARTIFACTS） |
 | 当前状态 | 混入主体 | **专节提炼**（OPEN STATE） |
 
-若被压缩历史中已存在一条 checkpoint，本次摘要会自动合并，保持单层结构。
+若被压缩的历史中已存在一条 checkpoint，本次摘要将自动与其合并，以保持单层结构。
 
 ---
 
@@ -165,22 +165,22 @@ LLM 请求
 
 ### OpenClaw 版（已有数据）
 
-数据来自 [flowctx（OpenClaw 版）](https://github.com/Ayou-Claw/flowctx) 在 SWE-bench Verified 上的评测（确定性挑选 40 题，覆盖 12 个仓库、跨 3 档难度；对照是共享会话下开启/关闭 flowctx）：
+以下数据来自 [flowctx（OpenClaw 版）](https://github.com/Ayou-Claw/flowctx) 在 SWE-bench Verified 上的评测（确定性抽取 40 题，覆盖 12 个仓库、跨 3 档难度；对照组为共享会话下开启与关闭 flowctx）：
 
 | 配置 | 解决率 | 平均分 | KV 命中率 | 总 token/题 |
 |------|:-----:|:------:|:--------:|:----------:|
-| flowctx **off** · 共享 | 68% | 71.1 | 96.1% | 288k |
-| flowctx **on** · 共享 | 68% | 71.8 | 93.9% | **127k** |
+| flowctx **关闭** · 共享 | 68% | 71.1 | 96.1% | 288k |
+| flowctx **开启** · 共享 | 68% | 71.8 | 93.9% | **127k** |
 
-> 解决率保持 68% 不变，平均每题 token 从 288k 降到 **127k（↓约 56%）**。
+> 解决率维持 68% 不变，平均每题 token 从 288k 降至 **127k（下降约 56%）**。
 
-目标不是"压缩后让模型神奇变强"，而是在不明显牺牲任务质量的前提下，让长会话 Agent **更省、更稳、更少重复劳动**。
+其目标并非「压缩后使模型能力凭空提升」，而是在不明显牺牲任务质量的前提下，使长会话 Agent **更省、更稳、更少重复计算**。
 
-📊 交互式图表（OpenClaw 版）：<https://ayou-claw.github.io/flowctx/data/bench/flowctx_bench_zh.html>
+交互式图表（OpenClaw 版）：<https://ayou-claw.github.io/flowctx/data/bench/flowctx_bench_zh.html>
 
 ### DSH 版（进行中）
 
-DSH 版的 SWE-bench 评测正在进行，结果将在此更新。
+DSH 版的 SWE-bench 评测正在进行中，结果将在此处更新。
 
 ---
 
@@ -212,7 +212,7 @@ cd flowctx-dsh && npm install && npm run build
 dsh plugin --profile web add /绝对路径/flowctx-dsh
 ```
 
-之后同样编辑 `cordis.patch.yml` 加入上述 `insert:` 块。
+随后同样编辑 `cordis.patch.yml`，加入上述 `insert:` 块。
 
 ### 验证加载
 
@@ -224,7 +224,7 @@ dsh --profile web --dump-config | grep flowctx
 
 ## 配置
 
-所有配置项可选，未配置时行为等同 `dsh-compaction-basic`（仅摘要风格不同）。
+所有配置项均为可选；未配置时，其行为等同于 `dsh-compaction-basic`（仅摘要风格不同）。
 
 ```yaml
 # ~/.dsh/profiles/web/cordis.patch.yml
@@ -263,25 +263,27 @@ dsh --profile web --dump-config | grep flowctx
 
 ## 设计属性
 
-flowctx-dsh 是一套**可检查、可调参、可恢复**的上下文管理层，而非黑盒记忆插件：
+flowctx-dsh 是一套**可检查、可调参、可恢复**的上下文管理层，而非黑盒式记忆插件：
 
-- **本地优先 · 可恢复** — 压缩引用存本地 CompressionStore（内存 + TTL 热缓存）；配置 `stateDir` 后，压缩引用、分层 summary nodes 与 scratchpad 一并持久化到 `<stateDir>/flowctx.sqlite`，内存未命中回落 SQLite 并回填热缓存。
-- **单句柄共享** — refs / summary-nodes / scratchpad 三个命名空间共用一个 SQLite 句柄，避免同一文件多句柄的并发写风险。
-- **不破坏真实会话** — 不改写宿主 transcript；摘要是加性的 `<flowctx-handoff-note>`；压缩仅发生在读时投影。
-- **不阻塞关键路径** — 分层摘要后台 fire-and-forget 执行。
-- **完整兜底** — `BasicCompactionEngine` 的压力检测、事务管理、溢出恢复等逻辑全部保留。
-- **可主动取回** — `flowctx_retrieve` 让 agent 按 hash 取回压缩原文，或按 node id 取回某层交接笔记（重启后从 SQLite 读）。
+- **本地优先，可恢复**——压缩引用存于本地 CompressionStore（内存 + TTL 热缓存）；配置 `stateDir` 后，压缩引用、分层 summary nodes 与 scratchpad 一并持久化至 `<stateDir>/flowctx.sqlite`，内存未命中时回落至 SQLite 并回填热缓存。
+- **单句柄共享**——refs、summary-nodes、scratchpad 三个命名空间共用同一 SQLite 句柄，规避同一文件多句柄带来的并发写风险。
+- **不破坏真实会话**——不改写宿主 transcript；摘要以加性方式写入 `<flowctx-handoff-note>`；压缩仅发生于读时投影。
+- **不阻塞关键路径**——分层摘要以后台 fire-and-forget 方式执行。
+- **完整兜底**——完整保留 `BasicCompactionEngine` 的压力检测、事务管理、溢出恢复等逻辑。
+- **可主动取回**——`flowctx_retrieve` 允许 Agent 按 hash 取回压缩原文，或按 node id 取回指定层级的交接笔记（重启后自 SQLite 读取）。
 
 ---
 
-## 适合谁
+## 适用场景
 
-- 正在用 DSH 构建 AI 编程 Agent；
-- 经常跑长会话、多文件、多阶段代码任务；
-- 工具输出多、prompt token 持续膨胀；
-- 不想用"一刀切截断"牺牲工程上下文；
-- 需要本地优先、可审计、可恢复的上下文机制；
-- 想研究 Agent 工作记忆、上下文压缩、KV-cache 友好投影。
+flowctx-dsh 适用于以下情形：
+
+- 正在基于 DSH 构建 AI 编程 Agent；
+- 频繁运行长会话、多文件、多阶段的代码任务；
+- 工具输出量大，prompt token 持续膨胀；
+- 不希望以「一刀切截断」的方式牺牲工程上下文；
+- 需要本地优先、可审计、可恢复的上下文管理机制；
+- 希望研究 Agent 工作记忆、上下文压缩与 KV-cache 友好的投影方案。
 
 ---
 
@@ -290,7 +292,7 @@ flowctx-dsh 是一套**可检查、可调参、可恢复**的上下文管理层�
 ```bash
 npm install       # 安装开发依赖
 npm run typecheck # 类型检查
-npm test          # 运行测试（无需外部凭据，129 passing）
+npm test          # 运行测试（无需外部凭据，129 项通过）
 npm run build     # esbuild → lib/index.js
 ```
 
@@ -302,7 +304,7 @@ npm run build     # esbuild → lib/index.js
 - **OpenClaw 原版**：<https://github.com/Ayou-Claw/flowctx>
 - **流程演示**：<https://ayou-claw.github.io/flowctx-dsh/docs/flow-demo-zh.html>
 
-> AI Agent 的能力，不只取决于模型本身，也取决于它如何管理自己的工作记忆。flowctx-dsh 给 DSH 提供了一种更工程化的答案：当前任务保持清晰，临近历史结构化压缩，更早历史形成交接笔记，所有关键材料仍可恢复。
+> AI Agent 的能力不仅取决于模型本身，也取决于它如何管理自己的工作记忆。flowctx-dsh 为 DSH 提供了一种更工程化的答案：当前任务保持清晰，临近历史结构化压缩，更早历史形成交接笔记，所有关键材料始终可恢复。
 
 ## 许可证
 

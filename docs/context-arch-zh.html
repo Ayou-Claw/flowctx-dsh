@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Harness：上下文管理架构</title>
+<style>
+  :root {
+    --bg: #0d1420;
+    --bg2: #0a1018;
+    --ink: #e8edf4;
+    --muted: #8ea0b5;
+    --faint: #6b7d94;
+    --blue: #4aa3e0;
+    --blue-bd: #2f6f9e;
+    --blue-fill: #0f1f2e;
+    --orange: #e6a33a;
+    --orange-bd: #b87d1f;
+    --orange-fill: #2a2010;
+    --orange-inner: #3a2e14;
+    --green: #35c66b;
+    --green-bd: #1f7a43;
+    --green-fill: #0c1f14;
+    --green-inner: #10331d;
+    --purple: #7b5cff;
+    --purple-bd: #4e3bb0;
+    --purple-fill: #1a1533;
+    --red: #d94a5a;
+    --red-bd: #7a2531;
+    --red-fill: #2a0e12;
+    --node: #1a2431;
+    --node-bd: #33465c;
+    --arrow: #7a8da0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg2); }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  .stage {
+    position: relative;
+    width: 1600px;
+    height: 1520px;
+    margin: 24px auto;
+    background: radial-gradient(140% 120% at 30% 0%, #12203010 0%, var(--bg) 55%, var(--bg2) 100%);
+    background-color: var(--bg);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  svg.wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+
+  .title {
+    position: absolute; left: 70px; top: 34px; z-index: 3;
+  }
+  .title h1 { margin: 0; font-size: 40px; font-weight: 800; letter-spacing: .5px; }
+  .title p { margin: 8px 0 0; font-size: 18px; color: var(--muted); font-weight: 400; }
+
+  .node { position: absolute; z-index: 2; border-radius: 12px; }
+
+  /* generic dark node */
+  .box {
+    background: var(--node);
+    border: 1.5px solid var(--node-bd);
+    text-align: center;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .box .t { font-size: 22px; font-weight: 700; }
+  .box .s { font-size: 15px; color: var(--faint); margin-top: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  /* layer container */
+  .layer {
+    border-radius: 14px;
+    border: 2px solid;
+    padding: 20px 26px;
+  }
+  .layer > .head { font-size: 24px; font-weight: 700; }
+  .layer > .sub { font-size: 15px; color: var(--muted); margin-top: 6px; }
+  .layer .pill {
+    margin-top: 16px;
+    border-radius: 10px;
+    padding: 14px 18px;
+    font-size: 17px;
+    text-align: center;
+  }
+  /* 短板标识：统一样式，绝对定位挂在各层左下角外沿 */
+  .weak {
+    position: absolute;
+    z-index: 3;
+    left: 118px;
+    font-size: 13.5px;
+    line-height: 1;
+    color: #d9c47a;
+    border: 1px dashed #7a6a2e;
+    border-radius: 8px;
+    padding: 8px 14px;
+    background: #211d0c;
+    white-space: nowrap;
+  }
+
+  .l-blue { border-color: var(--blue-bd); background: linear-gradient(180deg, #10202e 0%, #0c1824 100%); }
+  .l-blue .head { color: var(--blue); }
+  .l-blue .pill { background: #0f2637; border: 1.5px solid #24506e; color: #cfe6f7; }
+
+  .l-orange { border-color: var(--orange-bd); background: linear-gradient(180deg, #241a09 0%, #1c1507 100%); }
+  .l-orange .head { color: var(--orange); }
+  .l-orange .pill { background: var(--orange-inner); border: 1.5px solid #6a531c; color: #f0dca6; }
+
+  .l-green { border-color: var(--green-bd); background: linear-gradient(180deg, #0d2416 0%, #091a10 100%); }
+  .l-green .head { color: var(--green); }
+
+  .inner {
+    position: absolute; z-index: 2; border-radius: 11px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 10px;
+  }
+  .inner .t { font-size: 20px; font-weight: 700; }
+  .inner .s { font-size: 14.5px; margin-top: 5px; }
+
+  .i-green { background: var(--green-inner); border: 1.5px solid #256b3e; color: #d5f2e0; }
+  .i-green .s { color: #8fd3a9; font-family: ui-monospace, Menlo, monospace; }
+  .i-purple { background: var(--purple-fill); border: 1.5px solid var(--purple-bd); }
+  .i-purple .t { color: #cdbfff; }
+  .i-purple .s { color: #a596e6; }
+
+  .b-green { background: #0c2113; border: 2px solid var(--green-bd); }
+  .b-green .t { color: #b6f0cb; }
+  .b-red { background: var(--red-fill); border: 2px solid var(--red-bd); }
+  .b-red .t { color: #f2b8bf; font-size: 21px; }
+  .b-red .s { color: #d98a93; }
+
+  .footer {
+    position: absolute; left: 70px; right: 70px; bottom: 26px; z-index: 2;
+    background: #131c28; border: 1px solid #263548;
+    border-radius: 10px; padding: 12px 20px;
+    text-align: center; color: var(--muted); font-size: 15px;
+  }
+
+  .wlabel { position: absolute; z-index: 2; font-size: 15px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <!-- ============ WIRES (behind nodes) ============ -->
+  <svg class="wires" viewBox="0 0 1600 1520" preserveAspectRatio="none">
+    <defs>
+      <marker id="ar" markerWidth="12" markerHeight="12" refX="7" refY="6" orient="auto">
+        <path d="M1,1 L10,6 L1,11 Z" fill="#8194ab"/>
+      </marker>
+      <marker id="ar-g" markerWidth="12" markerHeight="12" refX="7" refY="6" orient="auto">
+        <path d="M1,1 L10,6 L1,11 Z" fill="#35c66b"/>
+      </marker>
+      <marker id="ar-p" markerWidth="12" markerHeight="12" refX="7" refY="6" orient="auto">
+        <path d="M1,1 L10,6 L1,11 Z" fill="#8a78e0"/>
+      </marker>
+      <marker id="ar-r" markerWidth="13" markerHeight="13" refX="7" refY="6.5" orient="auto">
+        <path d="M1,1 L11,6.5 L1,12 Z" fill="#d94a5a"/>
+      </marker>
+    </defs>
+
+    <!-- 工具调用返回 -> Layer0 -->
+    <line x1="800" y1="218" x2="800" y2="254" stroke="#8194ab" stroke-width="3.5" marker-end="url(#ar)"/>
+    <!-- Layer0 -> 会话历史 -->
+    <line x1="800" y1="464" x2="800" y2="506" stroke="#8194ab" stroke-width="3.5" marker-end="url(#ar)"/>
+    <!-- 会话历史 -> Layer1 -->
+    <line x1="800" y1="600" x2="800" y2="642" stroke="#8194ab" stroke-width="3.5" marker-end="url(#ar)"/>
+    <!-- Layer1 -> Layer2 -->
+    <line x1="800" y1="836" x2="800" y2="878" stroke="#8194ab" stroke-width="3.5" marker-end="url(#ar)"/>
+
+    <!-- inside layer2: token pressure -> summary -->
+    <line x1="612" y1="1028" x2="672" y2="1028" stroke="#35c66b" stroke-width="4" marker-end="url(#ar-g)"/>
+    <!-- TokenMeter -> summary (leftward) -->
+    <line x1="1218" y1="1028" x2="1152" y2="1028" stroke="#8a78e0" stroke-width="3.5" marker-end="url(#ar-p)"/>
+
+    <!-- Layer2 -> LLM 请求 -->
+    <line x1="800" y1="1152" x2="800" y2="1230" stroke="#35c66b" stroke-width="4" marker-end="url(#ar-g)"/>
+    <!-- LLM -> 成功响应 (diagonal) -->
+    <line x1="690" y1="1310" x2="360" y2="1338" stroke="#35c66b" stroke-width="4" marker-end="url(#ar-g)"/>
+
+    <!-- CONTEXT_WINDOW_EXCEEDED -> LLM retry (curve up-left) -->
+    <path d="M1190 1320 C 1160 1268, 1080 1268, 994 1276" fill="none" stroke="#d94a5a" stroke-width="3.5" marker-end="url(#ar-r)"/>
+  </svg>
+
+  <!-- ============ TITLE ============ -->
+  <div class="title">
+    <h1>DeepSeek Harness：上下文管理架构</h1>
+    <p>从单次工具输出，到历史裁剪、会话压缩，再到上下文溢出恢复</p>
+  </div>
+
+  <!-- ============ 工具调用返回 ============ -->
+  <div class="node box" style="left:610px; top:148px; width:380px; height:64px;">
+    <div class="t">工具调用返回</div>
+    <div class="s">tools/post-execute</div>
+  </div>
+
+  <!-- ============ LAYER 0 · SpillPolicy ============ -->
+  <div class="node layer l-blue" style="left:100px; top:260px; width:1400px; height:198px;">
+    <div class="head">Layer 0 · SpillPolicy</div>
+    <div class="sub">控制单次工具输出体积；完整原文写盘，之后仍可恢复</div>
+    <div style="display:flex; gap:16px; align-items:center; margin-top:16px;">
+      <div class="pill" style="flex:1;">超大结果 → 写入 Session 私有文件（原文可恢复）</div>
+      <div style="color:var(--muted); font-family:ui-monospace,Menlo,monospace; font-size:14px;">spill →</div>
+      <div class="pill" style="flex:1;">模型只看 head/tail 预览 + read/grep 提示</div>
+    </div>
+  </div>
+
+  <!-- ============ 会话历史 ============ -->
+  <div class="node box" style="left:590px; top:512px; width:420px; height:82px;">
+    <div class="t">会话历史（surface）</div>
+  </div>
+
+  <!-- ============ LAYER 1 · ToolResultPruner ============ -->
+  <div class="node layer l-orange" style="left:100px; top:648px; width:1400px; height:182px;">
+    <div class="head">Layer 1 · ToolResultPruner</div>
+    <div class="sub">对已进入历史的超长 tool/result 节点做就地裁剪；中间内容不再直接保留</div>
+    <div class="pill" style="margin-top:16px;">保留 head + tail · 中间替换为 pruned marker · 原文不可由本层恢复</div>
+  </div>
+
+  <!-- ============ LAYER 2 · BasicCompactionEngine ============ -->
+  <div class="node layer l-green" style="left:100px; top:884px; width:1400px; height:262px;">
+    <div class="head">Layer 2 · BasicCompactionEngine</div>
+    <div class="sub">在 agent/pre-step 测量压力，必要时把较早历史摘要为 Checkpoint</div>
+  </div>
+  <!-- inner: Token 压力判断 -->
+  <div class="node inner i-green" style="left:130px; top:990px; width:482px; height:76px;">
+    <div class="t">Token 压力判断</div>
+    <div class="s">contextWindow × ratio</div>
+  </div>
+  <!-- inner: 摘要 + Checkpoint -->
+  <div class="node inner i-green" style="left:672px; top:990px; width:480px; height:76px;">
+    <div class="t">摘要 + Checkpoint</div>
+    <div class="s">重放前缀 · 生成摘要 · 替换历史头部</div>
+  </div>
+  <!-- inner: TokenMeter (purple) -->
+  <div class="node inner i-purple" style="left:1218px; top:990px; width:224px; height:76px;">
+    <div class="t">TokenMeter</div>
+    <div class="s">Replay Fold</div>
+  </div>
+  <!-- ============ 三处短板标识：统一挂在各层左下角外沿 ============ -->
+  <div class="weak" style="top:442px;">短板：中间内容不进上下文，需靠 read/grep 主动回捞</div>
+  <div class="weak" style="top:814px;">短板：通用裁剪 · 失败路径与逐字标识符可能被稀释</div>
+  <div class="weak" style="top:1130px;">短板：同步 + 被动 · 摘要在关键路径上执行，无法即时干预</div>
+
+  <!-- ============ LLM 请求 ============ -->
+  <div class="node box b-green" style="left:610px; top:1236px; width:380px; height:74px;">
+    <div class="t">LLM 请求</div>
+    <div class="s" style="color:#8fd3a9;">正常路径</div>
+  </div>
+
+  <!-- ============ 成功响应 ============ -->
+  <div class="node box b-green" style="left:150px; top:1340px; width:320px; height:70px;">
+    <div class="t">成功响应</div>
+  </div>
+
+  <!-- ============ CONTEXT_WINDOW_EXCEEDED ============ -->
+  <div class="node box b-red" style="left:940px; top:1320px; width:500px; height:88px;">
+    <div class="t">CONTEXT_WINDOW_EXCEEDED</div>
+    <div class="s" style="margin-top:6px;">ToolResultPruner → Compaction → Retry</div>
+  </div>
+  <div class="wlabel" style="left:1110px; top:1230px; color:#d98a93;">retry</div>
+
+  <!-- ============ FOOTER ============ -->
+  <div class="footer">
+    设计原则：先用低成本、可恢复的体积控制；只有压力仍然存在时，才调用模型生成语义摘要。
+  </div>
+</div>
+</body>
+</html>
