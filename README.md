@@ -264,8 +264,9 @@ dsh --profile web --dump-config | grep flowctx
         # 可选：保留尾部比例（默认 0.16）
         retainRatio: 0.16
 
-        # 可选：SQLite 持久化目录。设置后，压缩引用与 summary nodes
-        # 会落盘到 <stateDir>/flowctx.sqlite，进程重启后可恢复。
+        # 可选：SQLite 持久化目录。设置后，压缩引用、summary nodes
+        # 与工作记忆 scratchpad 都会落盘到 <stateDir>/flowctx.sqlite，
+        # 三者共用一个数据库句柄，进程重启后可恢复。
         # 不设置则退化为纯内存 + TTL（会话内可恢复）。
         stateDir: ~/.dsh/profiles/web/flowctx-state
 ```

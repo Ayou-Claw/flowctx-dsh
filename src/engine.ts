@@ -24,6 +24,7 @@ type SummarizeInput = Parameters<BasicCompactionEngine['summarize']>[0]
 type SummarizeAgent = Parameters<BasicCompactionEngine['summarize']>[1]
 
 const SUMMARY_NS = 'summary-nodes'
+const SCRATCHPAD_NS = 'scratchpad'
 
 interface SessionMeta {
   summaryNodes: SummaryNode[]
@@ -43,7 +44,8 @@ interface SessionMeta {
  *   3. Reversible tool-result projection (tools/post-execute hook)
  *   4. Working-memory scratchpad tools (flowctx_scratch_*)
  *   5. flowctx_retrieve tool for hash/node lookups
- *   6. SQLite persistence for compression refs and summary nodes (survives restart)
+ *   6. SQLite persistence for compression refs, summary nodes, and the
+ *      working-memory scratchpad (all survive restart via one shared handle)
  */
 export class FlowCtxCompactionEngine extends BasicCompactionEngine {
   private readonly _fcfg: ResolvedFlowCtxConfig
@@ -75,7 +77,14 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
     }
 
     this._store = new CompressionStore(this._summaryStore ? { kv: this._summaryStore } : undefined)
-    this._scratch = new Scratchpad(cfg.scratchpadMaxChars)
+    // Share the ONE KvStore handle: compression refs, summary nodes, and the
+    // scratchpad all persist through the same DatabaseSync handle (distinct
+    // namespaces). Opening a second handle on the same file would defeat the
+    // per-handle write mutex.
+    this._scratch = new Scratchpad(
+      cfg.scratchpadMaxChars,
+      this._summaryStore ? { kv: this._summaryStore, ns: SCRATCHPAD_NS } : undefined,
+    )
     this._registerProjection()
     this._registerTools()
     // The pre-step hook drives two independent features: layered DAG drain
