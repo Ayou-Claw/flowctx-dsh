@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { CompressionStore, buildMarker } from '../src/store.ts'
+import { KvStore } from '../src/db/kv-store.ts'
 
 describe('CompressionStore', () => {
   it('stores and retrieves content by hash', () => {
@@ -62,6 +66,53 @@ describe('CompressionStore', () => {
     expect(store.size).toBe(3)
     expect(store.retrieve(h1)).toBeNull() // oldest evicted
     expect(store.retrieve(h2)).toBe('entry-2') // still present
+  })
+})
+
+describe('CompressionStore durable SQLite layer', () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'flowctx-store-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('retrieves from SQLite after an in-memory miss (restart path)', () => {
+    const kv = new KvStore(path.join(dir, 'flowctx.sqlite'))
+    // Skip when node:sqlite is unavailable — persistence degrades to no-op there.
+    if (!kv.available) return
+    const writer = new CompressionStore({ kv })
+    const hash = writer.store('durable payload', 3600, {})
+
+    // A fresh store sharing the same handle has an empty in-memory map, so the
+    // hit must come from SQLite (the post-restart retrieval path).
+    const reader = new CompressionStore({ kv })
+    expect(reader.retrieve(hash)).toBe('durable payload')
+  })
+
+  it('re-warms the in-memory map on a SQLite hit', () => {
+    const kv = new KvStore(path.join(dir, 'flowctx.sqlite'))
+    if (!kv.available) return
+    const writer = new CompressionStore({ kv })
+    const hash = writer.store('rewarm me', 3600, {})
+
+    const reader = new CompressionStore({ kv })
+    expect(reader.size).toBe(0)
+    reader.retrieve(hash)
+    expect(reader.size).toBe(1)
+  })
+
+  it('shares one handle across refs and other namespaces without conflict', () => {
+    const kv = new KvStore(path.join(dir, 'flowctx.sqlite'))
+    if (!kv.available) return
+    const store = new CompressionStore({ kv })
+    const hash = store.store('ref content', 3600, {})
+    // Simulate the engine writing summary nodes through the SAME handle.
+    kv.putSync('summary-nodes', 'session-1', JSON.stringify([{ id: 'd0-1-2' }]), null)
+    expect(store.retrieve(hash)).toBe('ref content')
+    expect(kv.get('summary-nodes', 'session-1')).toContain('d0-1-2')
   })
 })
 

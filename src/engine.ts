@@ -66,13 +66,15 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
     super(ctx, baseConfig)
     this._fcfg = cfg
 
-    // SQLite persistence: CompressionStore refs + summary nodes.
+    // SQLite persistence: ONE shared KvStore handle for both compression refs
+    // and summary nodes. A single DatabaseSync handle per file is required —
+    // opening two handles on the same file defeats the per-handle write mutex.
     if (cfg.stateDir) {
       const kv = new KvStore(path.join(cfg.stateDir, 'flowctx.sqlite'))
       if (kv.available) this._summaryStore = kv
     }
 
-    this._store = new CompressionStore(cfg.stateDir ? { dir: cfg.stateDir } : undefined)
+    this._store = new CompressionStore(this._summaryStore ? { kv: this._summaryStore } : undefined)
     this._scratch = new Scratchpad(cfg.scratchpadMaxChars)
     this._registerProjection()
     this._registerTools()
@@ -513,6 +515,7 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
     const store = this._store
     const scratch = this._scratch
     const sessionMeta = this._sessionMeta
+    const loadPersisted = (sessionId: string) => this._loadPersistedNodes(sessionId)
 
     ctx.tools.register(defineTool({
       name: 'flowctx_retrieve',
@@ -529,9 +532,18 @@ export class FlowCtxCompactionEngine extends BasicCompactionEngine {
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: String(value) }],
       },
-      async execute(args) {
+      async execute(args, exec) {
         const nodeArg = (args.node ?? '').trim()
         if (nodeArg) {
+          const sessionId = exec?.agent?.session?.id
+          // Prefer the caller's own in-memory session, then its persisted nodes
+          // (post-restart path), then any other loaded session as a last resort.
+          if (sessionId) {
+            const own = sessionMeta.get(sessionId)?.summaryNodes.find((n) => n.id === nodeArg)
+            if (own) return own.content
+            const persisted = loadPersisted(sessionId).find((n) => n.id === nodeArg)
+            if (persisted) return persisted.content
+          }
           for (const meta of sessionMeta.values()) {
             const found = meta.summaryNodes.find((n: SummaryNode) => n.id === nodeArg)
             if (found) return found.content

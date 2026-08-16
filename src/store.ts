@@ -4,7 +4,6 @@
 // back to it on a memory miss, re-warming the in-memory map on hit.
 
 import { createHash } from 'node:crypto'
-import path from 'node:path'
 import { KvStore } from './db/kv-store.ts'
 
 const REFS_NS = 'refs'
@@ -19,8 +18,13 @@ export interface StoredEntry {
 
 export interface CompressionStoreOptions {
   maxEntries?: number
-  /** When set, originals are also persisted to `<dir>/flowctx.sqlite` (survives restart). */
-  dir?: string
+  /**
+   * A durable KvStore for persisting originals (survives restart). Share ONE
+   * KvStore per DB file across all consumers — a second DatabaseSync handle on
+   * the same file is a concurrency hazard the transaction mutex can't cover
+   * (it's per-handle). The engine opens one KvStore and passes it here.
+   */
+  kv?: KvStore
 }
 
 export class CompressionStore {
@@ -33,10 +37,7 @@ export class CompressionStore {
     const opts: CompressionStoreOptions =
       typeof options === 'number' ? { maxEntries: options } : (options ?? {})
     this.maxEntries = opts.maxEntries ?? 500
-    if (opts.dir) {
-      const kv = new KvStore(path.join(opts.dir, 'flowctx.sqlite'))
-      if (kv.available) this.kv = kv
-    }
+    if (opts.kv?.available) this.kv = opts.kv
   }
 
   static hash(text: string): string {

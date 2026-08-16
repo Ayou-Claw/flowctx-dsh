@@ -70,6 +70,8 @@ flowctx-dsh 按照信息和当前任务的距离，把上下文分成三层：
 
 而离当前任务更远的内容，会被确定性投影或摘要折叠，既节省 token，又保留可恢复路径。
 
+与 DSH 原生 Layer 2 的同步压缩不同，flowctx-dsh 的分层摘要是**后台 fire-and-forget** 的：`agent/pre-step` 只做一次纯函数规划，真正的摘要 LLM 调用在关键路径之外异步执行，不会阻塞当前步骤；同一会话若在摘要途中再次触发，旧任务会被 generation 计数器 + AbortController 主动取代，避免重复劳动。
+
 ---
 
 ## 可逆压缩：省 token，但不把原文丢掉
@@ -243,6 +245,11 @@ dsh --profile web --dump-config | grep flowctx
 
         # 可选：保留尾部比例（默认 0.16）
         retainRatio: 0.16
+
+        # 可选：SQLite 持久化目录。设置后，压缩引用与 summary nodes
+        # 会落盘到 <stateDir>/flowctx.sqlite，进程重启后可恢复。
+        # 不设置则退化为纯内存 + TTL（会话内可恢复）。
+        stateDir: ~/.dsh/profiles/web/flowctx-state
 ```
 
 完整配置项继承自 `dsh-compaction-basic`，详见 `src/config.ts`。
@@ -253,11 +260,13 @@ dsh --profile web --dump-config | grep flowctx
 
 flowctx-dsh 的设计对开发者友好：
 
-- 压缩引用存储在本地 CompressionStore（内存 + TTL），会话内可恢复；
+- 压缩引用存储在本地 CompressionStore（内存 + TTL 热缓存）；配置 `stateDir` 后，压缩引用与分层 summary nodes 一并持久化到 `<stateDir>/flowctx.sqlite`，进程重启后可恢复（内存未命中时回落到 SQLite 并回填热缓存）；
+- 单一 SQLite 句柄跨 refs / summary-nodes 命名空间共享，避免同一文件多句柄的并发写风险；
 - 不改写宿主 transcript；
 - 摘要是加性的 `<flowctx-handoff-note>`；
+- 分层摘要在后台 fire-and-forget 执行，不阻塞 `agent/pre-step` 关键路径；
 - `BasicCompactionEngine` 的完整兜底逻辑保留；
-- `flowctx_retrieve` 工具让 Agent 可以主动按 hash 取回被压缩的原文。
+- `flowctx_retrieve` 工具让 Agent 可以主动按 hash 取回被压缩的原文，或按 node id 取回某层交接笔记（重启后从 SQLite 读取）。
 
 如果你在做 Agent 基础设施，这些细节很重要：它不是一个黑盒记忆插件，而是一套可检查、可调参、可恢复的上下文管理层。
 
