@@ -193,16 +193,17 @@ DSH 版的 SWE-bench 评测正在进行中，结果将在此处更新。
 dsh plugin --profile web add flowctx-dsh
 ```
 
-将插件加入 profile 的 patch 层：
+**这一步就够了。** `dsh plugin add` 会把 flowctx-dsh 写入 profile 的
+`dsh.profile.bundles` 列表；随后 dsh 会自动应用本插件自带的 bundle patch
+（仓库根 [`cordis.patch.yml`](./cordis.patch.yml)）——它 insert flowctx-dsh 并
+disable 内置 `compaction-basic`（因为 flowctx-dsh **接管 (OWNS)** `compaction` 服务）。
 
-```yaml
-# ~/.dsh/profiles/web/cordis.patch.yml
-- insert:
-    - id: flowctx-dsh
-      name: flowctx-dsh
-```
+> ⚠️ **不要**再手动往 `~/.dsh/profiles/<p>/cordis.patch.yml` 里加 `- insert: flowctx-dsh`。
+> bundle patch 已经 insert 过一次，手动再 insert 会造成**重复 insert**，dsh 启动直接报错。
+> profile 的 `cordis.patch.yml` 只用来做**配置覆盖**（见下方「配置」），不用于 insert。
 
-重启：`dsh web`
+重启：`dsh web`。卸载 / 回落内置引擎：`dsh plugin --profile web remove flowctx-dsh`
+（从 bundles 移除后，compaction-basic 自动恢复）。
 
 ### 方式二：本地开发版
 
@@ -212,7 +213,7 @@ cd flowctx-dsh && npm install && npm run build
 dsh plugin --profile web add /绝对路径/flowctx-dsh
 ```
 
-随后同样编辑 `cordis.patch.yml`，加入上述 `insert:` 块。
+同样地，`dsh plugin add` 已完成挂载，无需手动编辑 `insert:` 块。
 
 ### 验证加载
 
@@ -226,35 +227,37 @@ dsh --profile web --dump-config | grep flowctx
 
 所有配置项均为可选；未配置时，其行为等同于 `dsh-compaction-basic`（仅摘要风格不同）。
 
+插件本身已由 bundle patch 挂载（见「安装」），要**覆盖配置**，在 profile 的
+`cordis.patch.yml` 里对 `flowctx-dsh` 做 **config override**（`- id:` 而非 `- insert:`，
+避免重复 insert）：
+
 ```yaml
 # ~/.dsh/profiles/web/cordis.patch.yml
-- insert:
-    - id: flowctx-dsh
-      name: flowctx-dsh
-      config:
-        # —— 摘要（能力 1）——
-        summarizationProvider: ''   # 默认跟随 agent 当前路由
-        summarizationModel: ''
-        summaryMaxTokens: 0         # 摘要 token 上限，0 = 不限
-        thresholdRatio: 0.8         # 压缩触发阈值
-        retainRatio: 0.16           # 保留尾部比例
+- id: flowctx-dsh
+  config:
+    # —— 摘要（能力 1）——
+    summarizationProvider: ''   # 默认跟随 agent 当前路由
+    summarizationModel: ''
+    summaryMaxTokens: 0         # 摘要 token 上限，0 = 不限
+    thresholdRatio: 0.8         # 压缩触发阈值（大窗口模型可调低以更早触发摘要）
+    retainRatio: 0.16           # 保留尾部比例（必须 < thresholdRatio）
 
-        # —— 分层 DAG 摘要（能力 2，默认开）——
-        layeredSummary: true        # 后台折叠成分层 summary nodes
+    # —— 分层 DAG 摘要（能力 2，默认开）——
+    layeredSummary: true        # 后台折叠成分层 summary nodes
 
-        # —— 可逆投影（能力 3，默认开）——
-        projection: true            # 超阈值 tool result 结构化压缩
-        projectionThreshold: 1000   # 触发投影的 token 阈值
+    # —— 可逆投影（能力 3，默认开）——
+    projection: true            # 超阈值 tool result 结构化压缩
+    projectionThreshold: 1000   # 触发投影的 token 阈值
 
-        # —— 工作记忆 scratchpad（能力 4，默认关）——
-        scratchpad: false           # 开启后注册 flowctx_scratch_* 三个工具
-        scratchpadMaxChars: 8000
+    # —— 工作记忆 scratchpad（能力 4，默认关）——
+    scratchpad: false           # 开启后注册 flowctx_scratch_* 三个工具
+    scratchpadMaxChars: 8000
 
-        # —— SQLite 持久化（可选）——
-        # 设置后，压缩引用、summary nodes 与 scratchpad 三者共用一个
-        # 数据库句柄落盘到 <stateDir>/flowctx.sqlite，进程重启后可恢复；
-        # 不设置则退化为纯内存 + TTL（会话内可恢复）。
-        stateDir: ~/.dsh/profiles/web/flowctx-state
+    # —— SQLite 持久化（可选）——
+    # 设置后，压缩引用、summary nodes 与 scratchpad 三者共用一个
+    # 数据库句柄落盘到 <stateDir>/flowctx.sqlite，进程重启后可恢复；
+    # 不设置则退化为纯内存 + TTL（会话内可恢复）。
+    stateDir: ~/.dsh/profiles/web/flowctx-state
 ```
 
 完整配置项继承自 `dsh-compaction-basic`，详见 [`src/config.ts`](./src/config.ts)。

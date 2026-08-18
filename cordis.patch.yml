@@ -1,1 +1,13 @@
-[]
+# dsh bundle patch — a top-level YAML array of loader patch entries, applied
+# whenever this plugin is listed in a profile's dsh.profile.bundles.
+#
+# flowctx-dsh OWNS the `compaction` service (it subclasses BasicCompactionEngine),
+# so the built-in compaction-basic is disabled here and flowctx-dsh is inserted in
+# its place. Adding this plugin to a profile (`dsh plugin add flowctx-dsh`) is all
+# that's required — no manual profile-patch editing. To fall back to the built-in
+# engine, remove flowctx-dsh from the profile's bundles (`dsh plugin remove`).
+- id: compaction-basic
+  disabled: true
+- insert:
+    - id: flowctx-dsh
+      name: flowctx-dsh
